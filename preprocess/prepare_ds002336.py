@@ -101,7 +101,7 @@ def parse_args() -> argparse.Namespace:
         "--fmri-target-rois",
         type=int,
         default=None,
-        help="Optional target ROI count for fMRI. Uses Fourier resampling when set.",
+        help="Optional target ROI count for fMRI. Disabled by default because ROI interpolation changes the atlas semantics.",
     )
     parser.add_argument("--tr", type=float, default=2.0, help="fMRI repetition time.")
     parser.add_argument("--discard-initial-trs", type=int, default=2, help="Initial BOLD volumes to discard.")
@@ -115,7 +115,17 @@ def parse_args() -> argparse.Namespace:
         "--fmri-target-t",
         type=int,
         default=None,
-        help="Optional target time length for fMRI. Uses Fourier resampling when set.",
+        help="Optional target time length for fMRI. Disabled by default because temporal interpolation changes the raw TR grid.",
+    )
+    parser.add_argument(
+        "--allow-fmri-roi-resample",
+        action="store_true",
+        help="Explicitly allow Fourier resampling on the ROI axis. Use only for debugging, not for raw-faithful exports.",
+    )
+    parser.add_argument(
+        "--allow-fmri-time-resample",
+        action="store_true",
+        help="Explicitly allow Fourier resampling on the time axis. Use only for debugging, not for raw-faithful exports.",
     )
     parser.add_argument(
         "--eeg-mode",
@@ -123,8 +133,18 @@ def parse_args() -> argparse.Namespace:
         choices=["continuous", "patched"],
         help="continuous saves [C,T]; patched saves [C,S,P] for direct use by the default dataset.",
     )
-    parser.add_argument("--eeg-seq-len", type=int, default=30, help="EEG patch count when eeg-mode=patched.")
-    parser.add_argument("--eeg-patch-len", type=int, default=200, help="EEG patch length when eeg-mode=patched.")
+    parser.add_argument(
+        "--eeg-seq-len",
+        type=int,
+        default=None,
+        help="Optional EEG patch count when eeg-mode=patched. Defaults to 30 for run mode and to block duration in seconds for block mode.",
+    )
+    parser.add_argument(
+        "--eeg-patch-len",
+        type=int,
+        default=None,
+        help="Optional EEG patch length when eeg-mode=patched. Defaults to the EEG sampling rate so each patch spans about one second.",
+    )
     parser.add_argument(
         "--drop-ecg",
         action="store_true",
@@ -180,14 +200,51 @@ def maybe_patch_eeg(data: np.ndarray, seq_len: int, patch_len: int) -> np.ndarra
     return data.reshape(data.shape[0], seq_len, patch_len).astype(np.float32)
 
 
+def resolve_eeg_patch_params(
+    sfreq: float,
+    requested_seq_len: int | None,
+    requested_patch_len: int | None,
+    sample_mode: str,
+    duration_sec: float | None = None,
+) -> tuple[int, int]:
+    patch_len = requested_patch_len if requested_patch_len is not None else int(round(sfreq))
+    if patch_len <= 0:
+        raise ValueError(f"EEG patch length must be positive, got {patch_len}")
+
+    if requested_seq_len is not None:
+        seq_len = requested_seq_len
+    elif sample_mode == "block":
+        if duration_sec is None:
+            raise ValueError("Block-mode EEG patch inference requires duration_sec.")
+        seq_len = max(1, int(round(duration_sec)))
+    else:
+        seq_len = 30
+
+    if seq_len <= 0:
+        raise ValueError(f"EEG sequence length must be positive, got {seq_len}")
+    return seq_len, patch_len
+
+
 def resample_fmri_if_needed(
     series: np.ndarray,
     fmri_target_rois: int | None,
     fmri_target_t: int | None,
+    allow_roi_resample: bool,
+    allow_time_resample: bool,
 ) -> np.ndarray:
     if fmri_target_rois is not None and series.shape[0] != fmri_target_rois:
+        if not allow_roi_resample:
+            raise ValueError(
+                f"Requested fmri_target_rois={fmri_target_rois}, but extracted ROI count is {series.shape[0]}. "
+                "Provide a real atlas with the desired ROI count instead of interpolating, or pass --allow-fmri-roi-resample to override."
+            )
         series = resample(series, fmri_target_rois, axis=0).astype(np.float32)
     if fmri_target_t is not None and series.shape[1] != fmri_target_t:
+        if not allow_time_resample:
+            raise ValueError(
+                f"Requested fmri_target_t={fmri_target_t}, but the block contains {series.shape[1]} time points. "
+                "Keep the native TR grid for raw-faithful exports, or pass --allow-fmri-time-resample to override."
+            )
         series = resample(series, fmri_target_t, axis=1).astype(np.float32)
     return series.astype(np.float32)
 
@@ -199,6 +256,7 @@ def extract_roi_timeseries(
     discard_initial_trs: int,
     standardize_fmri: bool,
     fmri_target_t: int | None,
+    allow_time_resample: bool,
 ) -> np.ndarray:
     img = nib.load(str(fmri_nii_path))
     if discard_initial_trs > 0:
@@ -206,7 +264,7 @@ def extract_roi_timeseries(
     masker = NiftiLabelsMasker(labels_img=labels_img, standardize=standardize_fmri, detrend=True, t_r=tr)
     series = masker.fit_transform(img)
     series = series.T.astype(np.float32)
-    return resample_fmri_if_needed(series, None, fmri_target_t)
+    return resample_fmri_if_needed(series, None, fmri_target_t, allow_roi_resample=False, allow_time_resample=allow_time_resample)
 
 
 def load_task_events(ds_root: Path, task: str) -> pd.DataFrame:
@@ -301,7 +359,13 @@ def main() -> None:
         if args.sample_mode == "run":
             eeg = crop_eeg_to_task(eeg, task, sfreq=sfreq)
             if args.eeg_mode == "patched":
-                eeg = maybe_patch_eeg(eeg, seq_len=args.eeg_seq_len, patch_len=args.eeg_patch_len)
+                eeg_seq_len, eeg_patch_len = resolve_eeg_patch_params(
+                    sfreq=sfreq,
+                    requested_seq_len=args.eeg_seq_len,
+                    requested_patch_len=args.eeg_patch_len,
+                    sample_mode=args.sample_mode,
+                )
+                eeg = maybe_patch_eeg(eeg, seq_len=eeg_seq_len, patch_len=eeg_patch_len)
 
             fmri = extract_roi_timeseries(
                 fmri_nii_path=fmri_nii,
@@ -310,8 +374,15 @@ def main() -> None:
                 discard_initial_trs=args.discard_initial_trs,
                 standardize_fmri=args.standardize_fmri,
                 fmri_target_t=args.fmri_target_t,
+                allow_time_resample=args.allow_fmri_time_resample,
             )
-            fmri = resample_fmri_if_needed(fmri, args.fmri_target_rois, None)
+            fmri = resample_fmri_if_needed(
+                fmri,
+                args.fmri_target_rois,
+                None,
+                allow_roi_resample=args.allow_fmri_roi_resample,
+                allow_time_resample=args.allow_fmri_time_resample,
+            )
 
             sample_id = f"{subject}_{task}"
             eeg_out_path = eeg_out_dir / f"{sample_id}.npy"
@@ -344,6 +415,7 @@ def main() -> None:
             discard_initial_trs=0,
             standardize_fmri=args.standardize_fmri,
             fmri_target_t=None,
+            allow_time_resample=args.allow_fmri_time_resample,
         )
 
         for block_idx, row in events.reset_index(drop=True).iterrows():
@@ -352,10 +424,23 @@ def main() -> None:
             trial_type = str(row["trial_type"]).strip()
             eeg_block = slice_eeg_block(eeg, sfreq=sfreq, start_sec=onset_sec, duration_sec=duration_sec)
             if args.eeg_mode == "patched":
-                eeg_block = maybe_patch_eeg(eeg_block, seq_len=args.eeg_seq_len, patch_len=args.eeg_patch_len)
+                eeg_seq_len, eeg_patch_len = resolve_eeg_patch_params(
+                    sfreq=sfreq,
+                    requested_seq_len=args.eeg_seq_len,
+                    requested_patch_len=args.eeg_patch_len,
+                    sample_mode=args.sample_mode,
+                    duration_sec=duration_sec,
+                )
+                eeg_block = maybe_patch_eeg(eeg_block, seq_len=eeg_seq_len, patch_len=eeg_patch_len)
 
             fmri_block = slice_fmri_block(fmri_full, tr=args.tr, start_sec=onset_sec, duration_sec=duration_sec)
-            fmri_block = resample_fmri_if_needed(fmri_block, args.fmri_target_rois, args.fmri_target_t)
+            fmri_block = resample_fmri_if_needed(
+                fmri_block,
+                args.fmri_target_rois,
+                args.fmri_target_t,
+                allow_roi_resample=args.allow_fmri_roi_resample,
+                allow_time_resample=args.allow_fmri_time_resample,
+            )
 
             if args.label_mode == "binary_rest_task":
                 label, label_name = resolve_binary_label(trial_type)

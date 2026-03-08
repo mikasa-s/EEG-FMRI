@@ -1,0 +1,59 @@
+train:
+  batch_size: 16
+  eval_batch_size: 32
+  num_workers: 4
+  pin_memory: true
+data:
+  train_manifest_csv: outputs/ds002336_binary_block_model_ready/loso_subjectwise/fold_sub-xp110/manifest_train.csv
+  val_manifest_csv: outputs/ds002336_binary_block_model_ready/loso_subjectwise/fold_sub-xp110/manifest_val.csv
+  test_manifest_csv: outputs/ds002336_binary_block_model_ready/loso_subjectwise/fold_sub-xp110/manifest_test.csv
+  root_dir: outputs/ds002336_binary_block_model_ready
+  expected_eeg_shape:
+  - 63
+  - 20
+  - 200
+  expected_fmri_shape:
+  - 450
+  - 160
+  normalize_eeg: true
+  normalize_fmri: true
+  eeg_scale: 1.0
+  fmri_scale: 1.0
+eeg_model:
+  checkpoint_path: ''
+  in_dim: 200
+  out_dim: 200
+  d_model: 200
+  dim_feedforward: 800
+  seq_len: 20
+  n_layer: 12
+  nhead: 8
+  freeze_backbone: false
+fmri_model:
+  gradient_csv_path: assets/gradient_mapping_450.csv
+  checkpoint_path: ''
+  model_name: vit_base
+  crop_size:
+  - 450
+  - 160
+  patch_size: 16
+  attn_mode: normal
+  add_w: mapping
+  freeze_backbone: false
+finetune:
+  output_dir: outputs/finetune_ds002336_binary_block_loso/fold_sub-xp110
+  contrastive_checkpoint_path: ''
+  num_classes: 2
+  fusion: concat
+  hidden_dim: 512
+  dropout: 0.2
+  freeze_encoders: false
+  epochs: 10
+  lr: 0.0001
+  min_lr: 1.0e-06
+  weight_decay: 0.01
+  grad_clip: 1.0
+  use_amp: true
+  amp_dtype: fp16
+  log_interval: 20
+  eval_interval: 1

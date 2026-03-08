@@ -26,6 +26,7 @@ class GradTs2dPE(nn.Module):
     def __init__(self, in_chan, embed_dim, grid_size, add_w=False, cls_token=False) -> None:
         super().__init__()
         assert embed_dim % 2 == 0
+        self.grid_size = grid_size
         self.grid = self.get_grid(grid_size)
         self.emb_h = nn.Parameter(torch.zeros(grid_size[0] * grid_size[1], embed_dim // 2), requires_grad=False)
         pos_emb_h = self.get_1d_sincos_pos_embed_from_grid(embed_dim // 2, self.grid[0])
@@ -61,7 +62,7 @@ class GradTs2dPE(nn.Module):
     def forward(self, gradient):
         if self.add_w == "mapping":
             gradient_pos_embed = self.predictor_pos_embed_proj(gradient)
-            emb_w = gradient_pos_embed.squeeze().repeat_interleave(10, dim=0)
+            emb_w = gradient_pos_embed.squeeze().repeat_interleave(self.grid_size[1], dim=0)
             emb_w = (emb_w - emb_w.min()) / (emb_w.max() - emb_w.min()) * 2 - 1
         elif self.add_w == "origin":
             emb_w = self.emb_w

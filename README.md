@@ -155,6 +155,17 @@ s0002,eeg/sample_0002.npy,fmri/sample_0002.npy,1
 - `finetune.fusion`: `concat`、`eeg_only`、`fmri_only`。
 - `finetune.freeze_encoders`: 是否冻结编码器，仅训练分类头。
 
+形状对齐规则：
+
+- `eeg_model.seq_len` 必须等于 EEG 的 patch 数 `S`。
+- `eeg_model.in_dim` 必须等于 EEG 的 patch 长度 `P`。
+- `fmri_model.crop_size` 必须等于 fMRI 的 `[ROI, T]`。
+- 如果你在 `data.expected_eeg_shape` / `data.expected_fmri_shape` 里显式填写了期望形状，训练入口会在启动前把它和 manifest 首个样本做一致性校验。
+- 现在新增了一套 ds002336 block 二分类配置：`configs/train_contrastive_ds002336_binary_block.yaml` 和 `configs/finetune_classifier_ds002336_binary_block.yaml`。
+- 对 ds002336 这类 TR=2s、20s block 的数据，原生 fMRI 时间长度应是 10，而不是 160。把 10 插值成 160 只是旧模型适配技巧，不属于原始预处理结果。
+- 如果要使用 450 ROI，请提供真实的 450 区标签图，例如 `50 Tian Scale III subcortical + 400 Schaefer cortical` 的合并 atlas；不要把 400 ROI 直接插值成 450。
+- 如果要做留一被试交叉验证，可以用 `scripts/create_loso_subject_folds.py` 生成每个 fold 的 train/val/test manifest 与对应配置；默认是 1 个测试被试，剩余被试按 7:2 做 train/val。
+
 ## 6. 训练命令（多 GPU）
 
 对比学习主入口和训练函数现在分别在：

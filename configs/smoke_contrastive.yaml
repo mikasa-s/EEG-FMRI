@@ -1,0 +1,51 @@
+# 对比学习 smoke test 配置：默认强制 CPU，便于快速联调
+train:
+  output_dir: outputs/smoke_contrastive
+  force_cpu: true
+  epochs: 1
+  batch_size: 8
+  eval_batch_size: 8
+  num_workers: 0
+  pin_memory: false
+  lr: 0.0001
+  min_lr: 0.000001
+  weight_decay: 0.01
+  grad_clip: 1.0
+  use_amp: false
+  amp_dtype: fp16
+  temperature: 0.07
+  projection_dim: 128
+  log_interval: 1
+  eval_interval: 1
+  resume_path: ""
+
+data:
+  train_manifest_csv: examples/manifest_train.csv
+  val_manifest_csv: examples/manifest_val.csv
+  test_manifest_csv: examples/manifest_test.csv
+  root_dir: examples/sample_data
+  normalize_eeg: true
+  normalize_fmri: true
+  eeg_scale: 1.0
+  fmri_scale: 1.0
+
+eeg_model:
+  checkpoint_path: ""
+  in_dim: 200
+  out_dim: 200
+  d_model: 200
+  dim_feedforward: 800
+  seq_len: 30
+  n_layer: 2
+  nhead: 8
+  freeze_backbone: false
+
+fmri_model:
+  gradient_csv_path: assets/gradient_mapping_450.csv
+  checkpoint_path: ""
+  model_name: vit_small
+  crop_size: [450, 160]
+  patch_size: 16
+  attn_mode: normal
+  add_w: mapping
+  freeze_backbone: false

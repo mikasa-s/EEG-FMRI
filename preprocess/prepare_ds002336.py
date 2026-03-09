@@ -104,12 +104,17 @@ def parse_args() -> argparse.Namespace:
         help="Optional target ROI count for fMRI. Disabled by default because ROI interpolation changes the atlas semantics.",
     )
     parser.add_argument("--tr", type=float, default=2.0, help="fMRI repetition time.")
-    parser.add_argument("--discard-initial-trs", type=int, default=2, help="Initial BOLD volumes to discard.")
+    parser.add_argument(
+        "--discard-initial-trs",
+        type=int,
+        default=0,
+        help="Initial BOLD volumes to discard before any slicing. Defaults to 0 because ds002336 event onsets already start at 2s.",
+    )
     parser.add_argument(
         "--protocol-offset-sec",
         type=float,
-        default=2.0,
-        help="Seconds between fMRI acquisition start and protocol start in task events files.",
+        default=0.0,
+        help="Optional extra shift applied to event onsets before slicing. Defaults to 0 because ds002336 event onsets already encode the scanner lead-in.",
     )
     parser.add_argument(
         "--fmri-target-t",
@@ -412,7 +417,7 @@ def main() -> None:
             fmri_nii_path=fmri_nii,
             labels_img=labels_img,
             tr=args.tr,
-            discard_initial_trs=0,
+            discard_initial_trs=args.discard_initial_trs,
             standardize_fmri=args.standardize_fmri,
             fmri_target_t=None,
             allow_time_resample=args.allow_fmri_time_resample,

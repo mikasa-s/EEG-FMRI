@@ -128,6 +128,34 @@ def _validate_manifest_shapes(
                 f"fMRI crop size mismatch: manifest sample uses {sample_crop}, but fmri_model.crop_size is {crop_size}"
             )
 
+        patch_size = int(fmri_cfg.get("patch_size", 1))
+        if patch_size <= 0:
+            raise ValueError(f"fmri_model.patch_size must be positive, got {patch_size}")
+        if sample_crop[1] % patch_size != 0:
+            raise ValueError(
+                f"fMRI time length {sample_crop[1]} is not divisible by fmri_model.patch_size={patch_size}"
+            )
+
+
+def _validate_fmri_gradient_file(root: Path, fmri_cfg: dict[str, Any]) -> None:
+    """在 mapping 模式下，确保 gradient 文件的行数与 ROI 数一致。"""
+    gradient_path = root / str(fmri_cfg.get("gradient_csv_path", ""))
+    add_w = str(fmri_cfg.get("add_w", "mapping"))
+    crop_size = tuple(int(item) for item in fmri_cfg.get("crop_size", ()))
+    if len(crop_size) != 2:
+        raise ValueError(f"fmri_model.crop_size must be a 2-element sequence, got {crop_size}")
+
+    if add_w != "mapping":
+        return
+
+    gradient = np.loadtxt(gradient_path, delimiter=",", dtype=np.float32)
+    if gradient.ndim != 2:
+        raise ValueError(f"Gradient CSV must be a 2D matrix, got shape {gradient.shape} from {gradient_path}")
+    if gradient.shape[0] != crop_size[0]:
+        raise ValueError(
+            f"Gradient CSV row count {gradient.shape[0]} does not match fmri_model.crop_size[0]={crop_size[0]} in mapping mode"
+        )
+
 
 @dataclass
 class TrainConfig:
@@ -192,6 +220,7 @@ class TrainConfig:
         gradient_path = root / str(fmri_cfg.get("gradient_csv_path", ""))
         if not gradient_path.exists():
             raise FileNotFoundError(f"Gradient CSV not found: {gradient_path}")
+        _validate_fmri_gradient_file(root=root, fmri_cfg=fmri_cfg)
 
         for checkpoint_key, cfg_section in [("EEG", eeg_cfg), ("fMRI", fmri_cfg)]:
             checkpoint_path = str(cfg_section.get("checkpoint_path", "")).strip()
@@ -210,6 +239,9 @@ class TrainConfig:
             finetune_cfg = self.section("finetune")
             if "num_classes" not in finetune_cfg:
                 raise ValueError("Missing finetune.num_classes in config")
+            selection_metric = str(finetune_cfg.get("selection_metric", "accuracy")).strip().lower()
+            if selection_metric not in {"accuracy", "acc", "macro_f1", "f1"}:
+                raise ValueError("finetune.selection_metric must be one of: accuracy, acc, macro_f1, f1")
             contrastive_checkpoint = str(finetune_cfg.get("contrastive_checkpoint_path", "")).strip()
             if contrastive_checkpoint:
                 resolved = root / contrastive_checkpoint

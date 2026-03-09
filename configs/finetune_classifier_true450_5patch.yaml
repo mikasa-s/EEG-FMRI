@@ -1,26 +1,9 @@
-# ds002336 的原生 block fMRI 配置模板。
-# 这份配置假设：
-# 1. 使用真实 450 ROI atlas，而不是从 400 ROI 插值到 450。
-# 2. 20s block、TR=2s，因此每个 block 的原生 fMRI 长度是 10。
-# 3. 用 patch_size=1 保持 10 个时间 patch，而不是把 10 插值成 160 再切 patch。
+# 原生 fMRI 微调配置：10 个原生时间点按 patch_size=2 切成 5 个 fMRI patch。
 train:
-  output_dir: outputs/contrastive_ds002336_true450_rawfmri
-  epochs: 20
   batch_size: 16
   eval_batch_size: 32
   num_workers: 4
   pin_memory: true
-  lr: 0.0001
-  min_lr: 0.000001
-  weight_decay: 0.01
-  grad_clip: 1.0
-  use_amp: true
-  amp_dtype: fp16
-  temperature: 0.07
-  projection_dim: 256
-  log_interval: 20
-  eval_interval: 1
-  resume_path: ""
 
 data:
   train_manifest_csv: outputs/ds002336_true450_rawfmri/splits_subjectwise/manifest_train.csv
@@ -50,7 +33,26 @@ fmri_model:
   checkpoint_path: ""
   model_name: vit_base
   crop_size: [450, 10]
-  patch_size: 1
+  patch_size: 2
   attn_mode: normal
   add_w: mapping
   freeze_backbone: false
+
+finetune:
+  output_dir: outputs/finetune_true450_5patch
+  contrastive_checkpoint_path: ""
+  num_classes: 2
+  selection_metric: accuracy
+  fusion: concat
+  hidden_dim: 512
+  dropout: 0.2
+  freeze_encoders: false
+  epochs: 10
+  lr: 0.0001
+  min_lr: 0.000001
+  weight_decay: 0.01
+  grad_clip: 1.0
+  use_amp: true
+  amp_dtype: fp16
+  log_interval: 20
+  eval_interval: 1

@@ -3,6 +3,7 @@ from __future__ import annotations
 """分类微调训练器。"""
 
 from contextlib import nullcontext
+import json
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,7 @@ from .models import EEGfMRIClassifier
 class FinetuneTrainer:
     def __init__(self, cfg: dict[str, Any]):
         self.cfg = cfg
-        # smoke test 或显存不足时可通过配置强制走 CPU。
+        # 需要在 CPU 上运行或显存不足时，可通过配置强制走 CPU。
         force_cpu = bool(cfg.get("train", {}).get("force_cpu", False))
         self.world_size, self.rank, self.local_rank, self.device = init_distributed(force_cpu=force_cpu)
         self.project_root = Path(__file__).resolve().parent.parent
@@ -29,6 +30,14 @@ class FinetuneTrainer:
         finetune_cfg = cfg["finetune"]
         data_cfg = cfg["data"]
         self.fusion = str(finetune_cfg.get("fusion", "concat"))
+        selection_metric = str(finetune_cfg.get("selection_metric", "accuracy")).strip().lower()
+        if selection_metric == "acc":
+            selection_metric = "accuracy"
+        if selection_metric == "f1":
+            selection_metric = "macro_f1"
+        if selection_metric not in {"accuracy", "macro_f1"}:
+            raise ValueError("finetune.selection_metric must be one of: accuracy, acc, macro_f1, f1")
+        self.selection_metric = selection_metric
 
         train_dataset = self.build_dataset(data_cfg, split="train")
         # 多卡时由 DistributedSampler 负责切分样本，避免重复读同一数据。
@@ -94,6 +103,7 @@ class FinetuneTrainer:
 
         self.output_dir = self.resolve_path(str(finetune_cfg.get("output_dir", "outputs/finetune")))
         self.ckpt_dir = self.output_dir / "checkpoints"
+        self.best_checkpoint_path = self.ckpt_dir / "best.pth"
         if is_main_process():
             self.ckpt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -112,6 +122,8 @@ class FinetuneTrainer:
         dataset_cfg.pop("train_manifest_csv", None)
         dataset_cfg.pop("val_manifest_csv", None)
         dataset_cfg.pop("test_manifest_csv", None)
+        dataset_cfg.pop("expected_eeg_shape", None)
+        dataset_cfg.pop("expected_fmri_shape", None)
         dataset_cfg["require_eeg"] = self.fusion != "fmri_only"
         dataset_cfg["require_fmri"] = self.fusion != "eeg_only"
         return PairedEEGfMRIDataset(**dataset_cfg)
@@ -159,6 +171,22 @@ class FinetuneTrainer:
         if extra is not None:
             payload.update(extra)
         torch.save(payload, self.ckpt_dir / name)
+
+    def save_metrics(self, name: str, metrics: dict[str, float]) -> None:
+        """仅主进程保存评估指标，方便 LOSO 或实验汇总。"""
+        if not is_main_process():
+            return
+        with open(self.output_dir / name, "w", encoding="utf-8") as handle:
+            json.dump(metrics, handle, ensure_ascii=False, indent=2)
+
+    def load_checkpoint(self, checkpoint_path: Path) -> None:
+        """恢复最佳模型权重，用于最终测试集评估。"""
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        model_state = checkpoint["model"]
+        if hasattr(self.model, "module"):
+            self.model.module.load_state_dict(model_state, strict=False)
+        else:
+            self.model.load_state_dict(model_state, strict=False)
 
     def train_one_epoch(self, epoch: int) -> float:
         """执行一个 epoch 的下游分类训练。"""
@@ -237,7 +265,7 @@ class FinetuneTrainer:
         return metrics
 
     def fit(self) -> None:
-        """执行完整微调流程，并在最后跑测试集评估。"""
+        """执行完整微调流程，使用验证集指标选择最佳模型，并只对最佳模型做测试。"""
         best = -1.0
         for epoch in range(1, self.epochs + 1):
             train_loss = self.train_one_epoch(epoch)
@@ -249,14 +277,17 @@ class FinetuneTrainer:
                 val_metrics = self.evaluate(self.val_loader, split_name="val")
 
             self.save_checkpoint(epoch, train_loss, f"epoch_{epoch:03d}.pth", extra={"train_loss": train_loss})
-            current_score = val_metrics["accuracy"] if val_metrics is not None else -train_loss
+            current_score = val_metrics[self.selection_metric] if val_metrics is not None else -train_loss
             if current_score > best:
                 best = current_score
-                extra = {"train_loss": train_loss}
+                extra = {"train_loss": train_loss, "selection_metric": self.selection_metric}
                 if val_metrics is not None:
                     extra["val_metrics"] = val_metrics
                 self.save_checkpoint(epoch, best, "best.pth", extra=extra)
 
         if self.test_loader is not None:
-            self.evaluate(self.test_loader, split_name="test")
+            self.load_checkpoint(self.best_checkpoint_path)
+            test_metrics = self.evaluate(self.test_loader, split_name="test")
+            if test_metrics is not None:
+                self.save_metrics("test_metrics.json", test_metrics)
         cleanup_distributed()

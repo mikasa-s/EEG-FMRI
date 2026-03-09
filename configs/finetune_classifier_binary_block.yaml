@@ -1,5 +1,9 @@
-# ds002336 的原生 block fMRI 微调配置模板。
-# 这份配置假设真实 fMRI 输入形状为 [450, 10]，不使用时间插值与 ROI 插值。
+# 二分类 block 数据的微调配置。
+# 这份配置默认做 EEG+fMRI 融合二分类。
+# 如果后续换 patch 数，只需要同步修改：
+# 1. data.expected_eeg_shape
+# 2. eeg_model.seq_len
+# 3. 如果 patch 长度变了，再改 eeg_model.in_dim
 train:
   batch_size: 16
   eval_batch_size: 32
@@ -7,12 +11,12 @@ train:
   pin_memory: true
 
 data:
-  train_manifest_csv: outputs/ds002336_true450_rawfmri/splits_subjectwise/manifest_train.csv
-  val_manifest_csv: outputs/ds002336_true450_rawfmri/splits_subjectwise/manifest_val.csv
-  test_manifest_csv: outputs/ds002336_true450_rawfmri/splits_subjectwise/manifest_test.csv
-  root_dir: outputs/ds002336_true450_rawfmri
+  train_manifest_csv: outputs/ds002336_binary_block_model_ready/splits_subjectwise/manifest_train.csv
+  val_manifest_csv: outputs/ds002336_binary_block_model_ready/splits_subjectwise/manifest_val.csv
+  test_manifest_csv: outputs/ds002336_binary_block_model_ready/splits_subjectwise/manifest_test.csv
+  root_dir: outputs/ds002336_binary_block_model_ready
   expected_eeg_shape: [63, 20, 200]
-  expected_fmri_shape: [450, 10]
+  expected_fmri_shape: [450, 160]
   normalize_eeg: true
   normalize_fmri: true
   eeg_scale: 1.0
@@ -33,16 +37,18 @@ fmri_model:
   gradient_csv_path: assets/gradient_mapping_450.csv
   checkpoint_path: ""
   model_name: vit_base
-  crop_size: [450, 10]
-  patch_size: 1
+  crop_size: [450, 160]
+  patch_size: 16
   attn_mode: normal
   add_w: mapping
   freeze_backbone: false
 
 finetune:
-  output_dir: outputs/finetune_ds002336_true450_rawfmri
+  output_dir: outputs/finetune_binary_block
+  # 跑完对比学习后，把这里改成对应的 best.pth。
   contrastive_checkpoint_path: ""
   num_classes: 2
+  selection_metric: accuracy
   fusion: concat
   hidden_dim: 512
   dropout: 0.2

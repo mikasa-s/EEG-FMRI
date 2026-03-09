@@ -2,11 +2,14 @@ from __future__ import annotations
 
 """对比学习训练入口脚本。"""
 
-from mmcontrast.runner import run_training
-
 import argparse
 import sys
+import tempfile
 from pathlib import Path
+
+import yaml
+
+from mmcontrast.runner import run_training
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 # 允许直接从项目根目录执行脚本，而不依赖外部 PYTHONPATH 配置。
@@ -15,16 +18,104 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 def parse_args() -> argparse.Namespace:
-    """解析命令行参数，只暴露最核心的配置文件入口。"""
+    """解析命令行参数，支持直接覆盖常用训练配置。"""
     parser = argparse.ArgumentParser("EEG-fMRI contrastive training")
-    parser.add_argument("--config", type=str, default="configs/train_contrastive.yaml")
+    parser.add_argument("--config", type=str, default="configs/train_contrastive_binary_block.yaml")
+    parser.add_argument("--train-manifest", type=str, default="")
+    parser.add_argument("--val-manifest", type=str, default="")
+    parser.add_argument("--test-manifest", type=str, default="")
+    parser.add_argument("--root-dir", type=str, default="")
+    parser.add_argument("--output-dir", type=str, default="")
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--eval-batch-size", type=int, default=None)
+    parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--resume-path", type=str, default="")
+    parser.add_argument("--force-cpu", action="store_true")
+    parser.add_argument(
+        "--set",
+        dest="overrides",
+        action="append",
+        default=[],
+        help="Generic override in the form section.key=value. Can be repeated.",
+    )
     return parser.parse_args()
 
 
+def load_yaml_config(config_path: Path) -> dict:
+    with open(config_path, "r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)
+
+
+def assign_nested_value(payload: dict, dotted_key: str, value: object) -> None:
+    parts = dotted_key.split(".")
+    cursor = payload
+    for key in parts[:-1]:
+        next_value = cursor.get(key)
+        if next_value is None:
+            next_value = {}
+            cursor[key] = next_value
+        if not isinstance(next_value, dict):
+            raise ValueError(f"Cannot override nested key '{dotted_key}' because '{key}' is not a mapping")
+        cursor = next_value
+    cursor[parts[-1]] = value
+
+
+def apply_overrides(config: dict, args: argparse.Namespace) -> dict:
+    mapping: list[tuple[str, object]] = [
+        ("data.train_manifest_csv", args.train_manifest.strip()),
+        ("data.val_manifest_csv", args.val_manifest.strip()),
+        ("data.test_manifest_csv", args.test_manifest.strip()),
+        ("data.root_dir", args.root_dir.strip()),
+        ("train.output_dir", args.output_dir.strip()),
+        ("train.epochs", args.epochs),
+        ("train.batch_size", args.batch_size),
+        ("train.eval_batch_size", args.eval_batch_size),
+        ("train.num_workers", args.num_workers),
+        ("train.lr", args.lr),
+        ("train.resume_path", args.resume_path.strip()),
+    ]
+
+    for dotted_key, value in mapping:
+        if value not in (None, ""):
+            assign_nested_value(config, dotted_key, value)
+
+    if args.force_cpu:
+        assign_nested_value(config, "train.force_cpu", True)
+
+    for override in args.overrides:
+        if "=" not in override:
+            raise ValueError(f"Invalid override '{override}'. Expected section.key=value")
+        dotted_key, raw_value = override.split("=", 1)
+        assign_nested_value(config, dotted_key.strip(), yaml.safe_load(raw_value))
+
+    return config
+
+
+def write_runtime_config(config: dict, source_config: Path) -> Path:
+    runtime_dir = PROJECT_ROOT / ".runtime_configs"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        suffix=".yaml",
+        prefix=f"{source_config.stem}_",
+        dir=runtime_dir,
+        delete=False,
+    ) as handle:
+        yaml.safe_dump(config, handle, sort_keys=False, allow_unicode=True)
+        return Path(handle.name)
+
+
 def main() -> None:
-    """加载配置并启动对比学习训练流程。"""
+    """加载配置、应用命令行覆盖，并启动对比学习训练流程。"""
     args = parse_args()
-    run_training(args.config)
+    config_path = Path(args.config)
+    config = load_yaml_config(config_path)
+    resolved_config = apply_overrides(config, args)
+    runtime_config_path = write_runtime_config(resolved_config, config_path)
+    run_training(str(runtime_config_path))
 
 
 if __name__ == "__main__":

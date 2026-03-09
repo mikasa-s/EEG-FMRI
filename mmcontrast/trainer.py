@@ -22,7 +22,7 @@ from .models import EEGfMRIContrastiveModel
 class ContrastiveTrainer:
     def __init__(self, cfg: dict[str, Any]):
         self.cfg = cfg
-        # smoke test 或显存不足时可通过配置强制走 CPU。
+        # 需要在 CPU 上运行或显存不足时，可通过配置强制走 CPU。
         force_cpu = bool(cfg.get("train", {}).get("force_cpu", False))
         self.world_size, self.rank, self.local_rank, self.device = init_distributed(force_cpu=force_cpu)
         self.project_root = Path(__file__).resolve().parent.parent
@@ -43,7 +43,6 @@ class ContrastiveTrainer:
             pin_memory=bool(train_cfg.get("pin_memory", True)),
         )
         self.val_loader = self.build_optional_eval_loader(data_cfg, train_cfg, split="val")
-        self.test_loader = self.build_optional_eval_loader(data_cfg, train_cfg, split="test")
 
         self.model = self.build_model(cfg)
         if is_dist_initialized():
@@ -103,6 +102,8 @@ class ContrastiveTrainer:
         dataset_cfg.pop("train_manifest_csv", None)
         dataset_cfg.pop("val_manifest_csv", None)
         dataset_cfg.pop("test_manifest_csv", None)
+        dataset_cfg.pop("expected_eeg_shape", None)
+        dataset_cfg.pop("expected_fmri_shape", None)
         return PairedEEGfMRIDataset(**dataset_cfg)
 
     def build_loader(self, dataset, batch_size: int, sampler=None, shuffle=False, drop_last=False, num_workers=4, pin_memory=True):
@@ -263,7 +264,7 @@ class ContrastiveTrainer:
         return metrics
 
     def fit(self) -> None:
-        """执行完整训练流程，并在最后跑测试集评估。"""
+        """执行完整训练流程，使用验证集 loss 选择最佳模型。"""
         best = float("inf")
         for epoch in range(self.start_epoch, self.epochs + 1):
             train_loss = self.train_one_epoch(epoch)
@@ -279,9 +280,6 @@ class ContrastiveTrainer:
                 if val_metrics is not None:
                     extra["val_metrics"] = val_metrics
                 self.save_checkpoint(epoch, best, "best.pth", extra=extra)
-
-        if self.test_loader is not None:
-            self.evaluate(self.test_loader, split_name="test")
         cleanup_distributed()
 
     def train(self) -> None:

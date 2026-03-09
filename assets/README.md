@@ -6,4 +6,11 @@
 
 - gradient_mapping_450.csv
 
-如果你先执行 examples/build_dummy_data.py，会自动生成一个示例 gradient 文件到本目录，方便先跑通代码流程。
+Atlas 文件建议放在：
+
+- `assets/atlases/`
+
+当前已放入一个 Tian 子目录：
+
+- `assets/atlases/tian_s3_3t_50roi/Tian_Subcortex_S3_3T_50ROI.nii.gz`
+- `assets/atlases/tian_s3_3t_50roi/Tian_Subcortex_S3_3T_50ROI_labels.txt`

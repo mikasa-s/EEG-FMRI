@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 def parse_args() -> argparse.Namespace:
     """解析微调所需参数，支持直接覆盖常用配置。"""
     parser = argparse.ArgumentParser("EEG-fMRI finetuning for classification")
-    parser.add_argument("--config", type=str, default="configs/finetune_classifier_binary_block.yaml")
+    parser.add_argument("--config", type=str, default="configs/finetune_classifier_neurostorm_volume.yaml")
     parser.add_argument("--train-manifest", type=str, default="")
     parser.add_argument("--val-manifest", type=str, default="")
     parser.add_argument("--test-manifest", type=str, default="")

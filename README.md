@@ -1,114 +1,87 @@
 # EEG-fMRI-Contrastive
 
-一个自包含融合工程，用于把 `eeg-CBraMod` 和 `fmri-Brain-JEPA` 作为双塔编码器，进行 EEG-fMRI 跨模态对比学习（InfoNCE）。
+一个自包含融合工程，用于把 eeg-CBraMod 和 NeuroSTORM 作为双塔编码器，进行 EEG-fMRI 跨模态对比学习与下游分类。
 
-当前目录已经内置两套基础模型的核心骨干源码，不再依赖去其他仓库跨目录导入模型。
+当前工程不再依赖外部 NeuroSTORM 仓库路径；NeuroSTORM 的必需骨干代码已经内嵌到本仓库中。旧的 Brain-JEPA 源码目录仍保留在仓库里，但默认训练入口、主配置和 fMRI 适配层都已经切换到 NeuroSTORM volume 路径。
 
-## 1. 支持能力
+## 1. 当前默认能力
 
-- 内置 EEG 基础模型 `CBraMod` 完整骨干。
-- 内置 fMRI 基础模型 `Brain-JEPA VisionTransformer` 完整骨干。
-- 双塔投影到共享嵌入空间，做对称 InfoNCE 对比学习。
-- 支持 `torchrun` 多 GPU 分布式训练（DDP）。
-- 提供外接数据接口：
-  - Manifest CSV 数据集接口（开箱即用）。
-  - 自定义 Dataset 接口模板（你可以接任何自有数据格式）。
+- 内置 EEG 基础模型 CBraMod。
+- 内置 fMRI 基础模型 NeuroSTORM。
+- 支持 EEG + fMRI 双塔对称 InfoNCE 对比学习。
+- 支持分类微调，融合方式可选 concat、eeg_only、fmri_only。
+- 支持 manifest 驱动的数据接入。
+- 支持对 fMRI 体积做在线缩放接口：
+  - spatial: none / pad_or_crop / interpolate
+  - temporal: none / pad_or_crop / interpolate
 
-## 2. 文件夹结构
+## 2. 当前默认输入约定
+
+EEG 仍然使用 patch 后的三维数组：
+
+- EEG: [C, S, P]
+
+fMRI 默认切换为 NeuroSTORM 的体积输入：
+
+- fMRI raw sample: [H, W, D, T] 或 [C, H, W, D, T]
+- 训练时实际喂给模型的张量: [B, C, H, W, D, T]
+
+默认 NeuroSTORM 配置要求目标体积为 96 x 96 x 96 x 20，但你可以通过配置把不符合要求的数据在线 pad、crop 或 interpolate 到目标尺寸。
+
+注意：缩放只能解决尺寸不一致，不能修复 partial-brain coverage 这种采集层面的信息缺失。
+
+## 3. 目录重点
 
 ```text
 EEG-fMRI-Contrastive/
-  README.md
-  requirements.txt
   run_train.py
   run_finetune.py
+  requirements.txt
   configs/
-    train_contrastive_binary_block.yaml
-    finetune_classifier_binary_block.yaml
-    train_contrastive_true450_rawfmri.yaml
-    finetune_classifier_true450_rawfmri.yaml
-    train_contrastive_true450_5patch.yaml
-    finetune_classifier_true450_5patch.yaml
-  scripts/
-    train_multigpu.sh
-    train_multigpu.bat
-    build_subject_splits.py
-    build_loso_splits.py
-    demo_loso_pipeline.py
-    summarize_loso_metrics.py
-    inspect_checkpoints.py
-  assets/
-    gradient_mapping_450.csv        # 你自己的 ROI gradient 文件
-  pretrained_weights/
-    eeg_cbramod.pth                 # 可选，EEG 预训练权重
-    fmri_brainjepa.pth              # 可选，fMRI 预训练权重
+    train_contrastive_neurostorm_volume.yaml
+    finetune_classifier_neurostorm_volume.yaml
   mmcontrast/
-    __init__.py
-    config.py
-    distributed.py
-    losses.py
-    metrics.py
-    runner.py
-    finetune_runner.py
-    trainer.py
-    finetune_trainer.py
     datasets/
-      __init__.py
       paired_manifest_dataset.py
-      custom_interface.py
+      fmri_volume_ops.py
     backbones/
-      __init__.py
       eeg_cbramod/
-        __init__.py
-        cbramod.py
-        criss_cross_transformer.py
-      fmri_brainjepa/
-        __init__.py
-        vision_transformer.py
-        tensors.py
-        mask_utils.py
+      fmri_neurostorm/
     models/
-      __init__.py
-      classifier.py
       eeg_adapter.py
       fmri_adapter.py
       multimodal_model.py
+      classifier.py
 ```
 
-## 3. 环境安装
+## 4. 环境安装
 
-建议使用与你现有项目一致的 conda 环境。
+建议先安装依赖：
 
 ```bash
 pip install -r requirements.txt
 ```
 
-如果你想用 `flash_attn`，请自行安装对应版本；默认配置里已经把 `attn_mode` 设置成 `normal`，即使不安装也能运行。
+NeuroSTORM 路径至少需要：
 
-## 4. 你的数据如何接入
+- monai
+- einops
 
-### 4.1 推荐方式：Manifest CSV
+mamba-ssm 已加入 requirements，但在 Windows 上不一定总能直接安装成功。当前仓库内置了一个轻量 fallback mixer，缺少 mamba-ssm 时仍可跑通结构；如果你要尽量贴近原版 NeuroSTORM，仍建议安装 mamba-ssm。
 
-在 `data.root_dir` 下组织文件，例如：
+## 5. 数据接入
 
-```text
-my_data/
-  eeg/
-    sample_0001.npy
-  fmri/
-    sample_0001.npy
-  manifest_train.csv
-```
+Manifest CSV 必需列：
 
-`manifest_train.csv` 必需列：
-
-- `eeg_path`
-- `fmri_path`
+- eeg_path
+- fmri_path
 
 可选列：
 
-- `sample_id`
-- `label`
+- sample_id
+- label
+- eeg_shape
+- fmri_shape
 
 示例：
 
@@ -118,205 +91,68 @@ s0001,eeg/sample_0001.npy,fmri/sample_0001.npy,0
 s0002,eeg/sample_0002.npy,fmri/sample_0002.npy,1
 ```
 
-数据张量形状要求：
+## 6. 关键配置
 
-- EEG: `numpy` 形状 `[C, S, P]`，对应 `[通道, patch段数, patch长度]`。
-- fMRI: `numpy` 形状 `[1, ROI, T]` 或 `[ROI, T]`（后者会自动补成 `[1, ROI, T]`）。
+当前默认训练配置：
 
-支持后缀：`.npy`、`.npz`（默认读取 `arr_0`）、`.pt`。
+- configs/train_contrastive_neurostorm_volume.yaml
+- configs/finetune_classifier_neurostorm_volume.yaml
 
-### 4.2 自定义方式：自己写 Dataset
+核心字段说明：
 
-参考 `mmcontrast/datasets/custom_interface.py`，输出字段保持：
+### data
 
-```python
-{
-  "eeg": Tensor[C, S, P],
-  "fmri": Tensor[1, ROI, T],
-  "sample_id": str,
-  "label": int  # optional
-}
-```
+- train_manifest_csv / val_manifest_csv / test_manifest_csv: manifest 路径
+- root_dir: 相对路径根目录
+- fmri_input_type: 默认 volume
+- fmri_target_shape: NeuroSTORM 目标尺寸，默认 [96, 96, 96, 20]
+- fmri_spatial_strategy: none / pad_or_crop / interpolate
+- fmri_temporal_strategy: none / pad_or_crop / interpolate
+- fmri_normalize_nonzero_only: 是否只对非零脑区做 z-score
 
-然后在 `mmcontrast/trainer.py` 中把数据集替换为你的类即可。
+### fmri_model
 
-## 5. 关键配置说明
+- backbone: neurostorm
+- img_size: 必须和 data.fmri_target_shape 保持一致
+- patch_size: 默认 [6, 6, 6, 1]
+- depths: 默认 [2, 2, 6, 2]
+- num_heads: 默认 [3, 6, 12, 24]
+- embed_dim: 默认 24
 
-对比学习默认配置文件：`configs/train_contrastive_binary_block.yaml`
+### 形状校验规则
 
-- `eeg_model.checkpoint_path`: EEG 预训练权重路径。
-- `fmri_model.gradient_csv_path`: fMRI gradient csv 路径。
-- `fmri_model.checkpoint_path`: fMRI 预训练权重（可留空）。
-- `data.train_manifest_csv`: 训练集配对清单。
-- `data.val_manifest_csv`: 验证集配对清单。
-- `data.test_manifest_csv`: 测试集配对清单。
-- `data.root_dir`: 清单中相对路径的根目录。
+- EEG 样本必须是 [C, S, P]
+- NeuroSTORM 目标体积必须是四维 [H, W, D, T]
+- fmri_model.img_size 必须与 data.fmri_target_shape 一致
+- img_size 必须能被 patch_size 整除
+- 如果 manifest 中的原始体积尺寸与 img_size 不同，必须显式打开 spatial 或 temporal 缩放策略，否则启动前就会报错
 
-分类微调默认配置文件：`configs/finetune_classifier_binary_block.yaml`
+## 7. 训练入口
 
-- `finetune.contrastive_checkpoint_path`: 对比学习得到的 `best.pth` 或其它 checkpoint。
-- `finetune.num_classes`: 分类类别数。
-- `finetune.selection_metric`: 用哪个验证集指标选择最佳微调模型，可选 `accuracy` / `acc` / `macro_f1` / `f1`，默认 `accuracy`。
-- `finetune.fusion`: `concat`、`eeg_only`、`fmri_only`。
-- `finetune.freeze_encoders`: 是否冻结编码器，仅训练分类头。
-
-形状对齐规则：
-
-- `eeg_model.seq_len` 必须等于 EEG 的 patch 数 `S`。
-- `eeg_model.in_dim` 必须等于 EEG 的 patch 长度 `P`。
-- `fmri_model.crop_size` 必须等于 fMRI 的 `[ROI, T]`。
-- 如果你在 `data.expected_eeg_shape` / `data.expected_fmri_shape` 里显式填写了期望形状，训练入口会在启动前把它和 manifest 首个样本做一致性校验。
-- 现在新增了一套通用 block 二分类配置：`configs/train_contrastive_binary_block.yaml` 和 `configs/finetune_classifier_binary_block.yaml`。
-- 对 ds002336 这类 TR=2s、20s block 的数据，原生 fMRI 时间长度应是 10，而不是 160。把 10 插值成 160 只是旧模型适配技巧，不属于原始预处理结果。
-- 如果要使用 450 ROI，请提供真实的 450 区标签图，例如 `50 Tian Scale III subcortical + 400 Schaefer cortical` 的合并 atlas；不要把 400 ROI 直接插值成 450。
-- 如果要做留一被试交叉验证，可以用 `scripts/build_loso_splits.py` 按需生成每个 fold 的 train/val/test manifest。脚本默认只写 split 清单，不再默认输出每折 YAML；只有显式传入 `--write-fold-configs --config-dir ...` 时才会额外生成派生配置文件。`--val-subjects` 默认控制每折验证被试数。
-
-## 6. 训练命令（多 GPU）
-
-对比学习主入口和训练函数现在分别在：
-
-- 主函数入口：`run_train.py -> main()`
-- 运行调度：`mmcontrast/runner.py -> run_training()`
-- 总训练循环：`mmcontrast/trainer.py -> fit()`
-- 单轮训练：`mmcontrast/trainer.py -> train_one_epoch()`
-
-当前默认实验逻辑：
-
-- 对比学习只在训练集上更新模型。
-- 对比学习使用验证集 `loss` 选择 `best.pth`。
-- 对比学习评估默认关注验证集，不再默认对测试集做最终评估。
-
-分类微调主入口和训练函数现在分别在：
-
-- 主函数入口：`run_finetune.py -> main()`
-- 运行调度：`mmcontrast/finetune_runner.py -> run_finetuning()`
-- 总训练循环：`mmcontrast/finetune_trainer.py -> fit()`
-- 单轮训练：`mmcontrast/finetune_trainer.py -> train_one_epoch()`
-
-微调默认实验逻辑：
-
-- 微调只在训练集上更新模型。
-- 微调使用验证集指标选择 `best.pth`，默认是 `accuracy`，也可以改成 `macro_f1`。
-- 微调只对验证集选出的最佳模型执行最终测试集评估。
-
-### Linux/macOS
+默认对比学习：
 
 ```bash
-bash scripts/train_multigpu.sh 4 configs/train_contrastive_binary_block.yaml
+python run_train.py
 ```
 
-### Windows
-
-```bat
-scripts\train_multigpu.bat 2 configs\train_contrastive_binary_block.yaml
-```
-
-或直接：
-
-```bat
-python -m torch.distributed.run --nproc_per_node=2 run_train.py --config configs/train_contrastive_binary_block.yaml
-```
-
-## 7. 当前实验入口
-
-1. 生成 ds002336 block 二分类数据：
+默认分类微调：
 
 ```bash
-python preprocess/prepare_ds002336.py --ds-root D:/OpenNeuro/ds002336 --output-root D:/OpenNeuro/EEG-fMRI-Contrastive/outputs/ds002336_binary_block_model_ready --tasks eegNF fmriNF eegfmriNF --sample-mode block --label-mode binary_rest_task --eeg-mode patched --drop-ecg --n-rois 400
+python run_finetune.py
 ```
 
-2. 生成被试级切分：
+也可以覆盖常用字段：
 
 ```bash
-python scripts/build_subject_splits.py --manifest D:/OpenNeuro/EEG-fMRI-Contrastive/outputs/ds002336_binary_block_model_ready/manifest_all.csv --output-dir D:/OpenNeuro/EEG-fMRI-Contrastive/outputs/ds002336_binary_block_model_ready/splits_subjectwise
+python run_train.py --config configs/train_contrastive_neurostorm_volume.yaml --train-manifest outputs/volume_dataset/manifest_train.csv --val-manifest outputs/volume_dataset/manifest_val.csv --root-dir outputs/volume_dataset --output-dir outputs/contrastive_volume_run2 --set data.fmri_spatial_strategy='interpolate' --set data.fmri_temporal_strategy='pad_or_crop'
 ```
-
-3. 运行对比学习：
 
 ```bash
-python run_train.py --config configs/train_contrastive_binary_block.yaml
+python run_finetune.py --config configs/finetune_classifier_neurostorm_volume.yaml --train-manifest outputs/volume_dataset/manifest_train.csv --val-manifest outputs/volume_dataset/manifest_val.csv --test-manifest outputs/volume_dataset/manifest_test.csv --root-dir outputs/volume_dataset --contrastive-checkpoint outputs/contrastive_neurostorm_volume/checkpoints/best.pth
 ```
 
-也可以直接在主入口覆盖常用字段，而不再额外手写临时 YAML：
+## 8. 当前实现边界
 
-```bash
-python run_train.py --config configs/train_contrastive_binary_block.yaml --train-manifest outputs/ds002336_binary_block_model_ready/splits_subjectwise/manifest_train.csv --val-manifest outputs/ds002336_binary_block_model_ready/splits_subjectwise/manifest_val.csv --root-dir outputs/ds002336_binary_block_model_ready --output-dir outputs/contrastive_binary_block_run2 --epochs 30 --batch-size 8 --set data.expected_fmri_shape=[450,10]
-```
-
-4. 运行分类微调：
-
-```bash
-python run_finetune.py --config configs/finetune_classifier_binary_block.yaml
-```
-
-同样支持直接覆盖常用实验参数：
-
-```bash
-python run_finetune.py --config configs/finetune_classifier_binary_block.yaml --train-manifest outputs/ds002336_binary_block_model_ready/splits_subjectwise/manifest_train.csv --val-manifest outputs/ds002336_binary_block_model_ready/splits_subjectwise/manifest_val.csv --test-manifest outputs/ds002336_binary_block_model_ready/splits_subjectwise/manifest_test.csv --root-dir outputs/ds002336_binary_block_model_ready --contrastive-checkpoint outputs/contrastive_binary_block/checkpoints/best.pth --output-dir outputs/finetune_binary_block_run2 --selection-metric macro_f1
-```
-
-5. 留一被试和汇总工具：
-
-```bash
-python scripts/build_loso_splits.py --manifest outputs/ds002336_binary_block_model_ready/manifest_all.csv --output-dir outputs/ds002336_binary_block_model_ready/loso_subjectwise --val-subjects 1
-python scripts/summarize_loso_metrics.py --finetune-root outputs/finetune_binary_block_loso
-python scripts/demo_loso_pipeline.py
-```
-
-6. 输出内容：
-
-- `outputs/exp01/resolved_config.yaml`
-- `outputs/exp01/checkpoints/epoch_XXX.pth`
-- `outputs/exp01/checkpoints/best.pth`
-
-评估指标：
-
-- 对比学习会输出 `loss`、`eeg_to_fmri_r1`、`fmri_to_eeg_r1`、`eeg_to_fmri_r5`、`fmri_to_eeg_r5`、`mean_r1`，以及对应的 `*_std` 字段。
-- 微调会输出 `loss`、`accuracy`、`macro_f1`，以及 `accuracy_std`、`macro_f1_std`。
-
-对比学习会在验证/测试集上输出：
-
-- `loss`
-- `eeg_to_fmri_r1`
-- `fmri_to_eeg_r1`
-- `eeg_to_fmri_r5`
-- `fmri_to_eeg_r5`
-
-分类微调会在验证/测试集上输出：
-
-- `loss`
-- `accuracy`
-- `macro_f1`
-
-## 8. 说明
-
-- 对比学习默认使用对称 InfoNCE。
-- 两个基础模型默认都可训练；可在配置中设置 `freeze_backbone: true` 固定其中某个编码器。
-- 如果你需要加入监督任务（比如分类头、多任务 loss），建议在 `mmcontrast/trainer.py` 中扩展。
-- 现在支持从 `train.resume_path` 恢复训练。
-- 分类微调默认把 EEG 和 fMRI 特征拼接后做分类，也支持单模态分类。
-- 仓库已移除 smoke/demo 路径，当前默认工作流是：预处理 -> 切分脚本 -> `run_train.py` -> `run_finetune.py`。`scripts/` 目录只保留切分、检查、汇总和端到端 demo 工具。
-
-## 9. 模型源码在哪里
-
-你要找的完整基础模型源码现在在这里：
-
-- EEG 骨干：`mmcontrast/backbones/eeg_cbramod/cbramod.py`
-- EEG Transformer 依赖：`mmcontrast/backbones/eeg_cbramod/criss_cross_transformer.py`
-- fMRI 骨干：`mmcontrast/backbones/fmri_brainjepa/vision_transformer.py`
-- fMRI 依赖：`mmcontrast/backbones/fmri_brainjepa/tensors.py`
-- fMRI mask 工具：`mmcontrast/backbones/fmri_brainjepa/mask_utils.py`
-
-`mmcontrast/models/eeg_adapter.py` 和 `mmcontrast/models/fmri_adapter.py` 现在只负责加载本地骨干和权重，不再从外部仓库导入。
-
-## 10. 目前还差什么
-
-从“代码结构完整性”来说，当前已经具备完整实验主链路。
-
-离你真正用自己数据稳定跑起来，还剩的关键项是：
-
-- 把你真实的 EEG/fMRI 配对数据整理成 manifest 或自定义 Dataset。
-- 把真实的 `gradient_mapping_450.csv` 放到 `assets/`。
-- 如果你要加载预训练模型，把权重放到 `pretrained_weights/` 并在配置里填写路径。
-- 如果你后续需要更复杂的评估，比如 AUC、混淆矩阵、患者级投票、多模态缺失鲁棒性，还可以继续扩展。
-- 如果你需要完全复现原始两篇工作的预训练细节，目前还没有把两边原始 trainer 的全部策略逐项迁入这个融合工程。
+- 当前默认路径已经切到 NeuroSTORM volume 输入。
+- 旧的 Brain-JEPA 相关配置文件仍在仓库里，但不再是默认入口。
+- 如果你后续删除外部 NeuroSTORM-main 文件夹，不会影响这个仓库当前的 NeuroSTORM 主路径。

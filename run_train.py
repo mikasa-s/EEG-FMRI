@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 def parse_args() -> argparse.Namespace:
     """解析命令行参数，支持直接覆盖常用训练配置。"""
     parser = argparse.ArgumentParser("EEG-fMRI contrastive training")
-    parser.add_argument("--config", type=str, default="configs/train_contrastive_binary_block.yaml")
+    parser.add_argument("--config", type=str, default="configs/train_contrastive_neurostorm_volume.yaml")
     parser.add_argument("--train-manifest", type=str, default="")
     parser.add_argument("--val-manifest", type=str, default="")
     parser.add_argument("--test-manifest", type=str, default="")

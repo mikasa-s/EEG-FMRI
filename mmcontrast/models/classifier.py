@@ -12,10 +12,14 @@ class EEGfMRIClassifier(nn.Module):
     def __init__(self, cfg: dict):
         super().__init__()
         finetune_cfg = cfg["finetune"]
-        self.fusion = str(finetune_cfg.get("fusion", "concat"))
+        eeg_cfg = cfg["eeg_model"]
+        fmri_cfg = cfg["fmri_model"]
+        self.fusion = str(finetune_cfg.get("fusion", "eeg_only"))
         # 复用对比学习阶段的双塔骨干作为下游特征提取器。
         self.backbone = EEGfMRIContrastiveModel(cfg)
 
+        eeg_checkpoint_path = str(eeg_cfg.get("checkpoint_path", "")).strip()
+        fmri_checkpoint_path = str(fmri_cfg.get("checkpoint_path", "")).strip()
         checkpoint_path = str(finetune_cfg.get("contrastive_checkpoint_path", "")).strip()
         if checkpoint_path:
             checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -27,6 +31,22 @@ class EEGfMRIClassifier(nn.Module):
                 if name in current_state and current_state[name].shape == value.shape:
                     compatible_state[name] = value
             self.backbone.load_state_dict(compatible_state, strict=False)
+            self.initialization_summary = f"Finetune init: loaded contrastive checkpoint from {checkpoint_path}."
+        elif eeg_checkpoint_path or fmri_checkpoint_path:
+            sources = []
+            if eeg_checkpoint_path:
+                sources.append(f"EEG={eeg_checkpoint_path}")
+            if fmri_checkpoint_path:
+                sources.append(f"fMRI={fmri_checkpoint_path}")
+            joined_sources = ", ".join(sources)
+            self.initialization_summary = (
+                "Finetune init: no contrastive checkpoint provided; using modality-specific encoder checkpoints "
+                f"({joined_sources})."
+            )
+        else:
+            self.initialization_summary = (
+                "Finetune init: no existing checkpoint provided; using random initialization and training from scratch."
+            )
 
         if bool(finetune_cfg.get("freeze_encoders", False)):
             # 冻结骨干时，只训练后接的分类头。

@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 
 from .datasets import PairedEEGfMRIDataset
-from .distributed import cleanup_distributed, gather_tensor, init_distributed, is_dist_initialized, is_main_process
+from .distributed import cleanup_distributed, configure_runtime_devices, gather_tensor, init_distributed, is_dist_initialized, is_main_process
 from .losses import SymmetricInfoNCELoss
 from .metrics import contrastive_retrieval_metrics
 from .models import EEGfMRIContrastiveModel
@@ -23,7 +23,7 @@ class ContrastiveTrainer:
     def __init__(self, cfg: dict[str, Any]):
         self.cfg = cfg
         # 需要在 CPU 上运行或显存不足时，可通过配置强制走 CPU。
-        force_cpu = bool(cfg.get("train", {}).get("force_cpu", False))
+        force_cpu = configure_runtime_devices(cfg.get("train", {}))
         self.world_size, self.rank, self.local_rank, self.device = init_distributed(force_cpu=force_cpu)
         self.project_root = Path(__file__).resolve().parent.parent
 
@@ -42,9 +42,13 @@ class ContrastiveTrainer:
             num_workers=int(train_cfg.get("num_workers", 4)),
             pin_memory=bool(train_cfg.get("pin_memory", True)),
         )
-        self.val_loader = self.build_optional_eval_loader(data_cfg, train_cfg, split="val")
+        # 对比学习阶段只使用训练集，不构建验证集或测试集，避免误用下游评估数据。
+        self.val_loader = None
 
         self.model = self.build_model(cfg)
+        if is_main_process():
+            total_params, trainable_params = self.count_parameters(self.model)
+            print(f"Model params: total={total_params:,}, trainable={trainable_params:,}")
         if is_dist_initialized():
             # 只有真正进入分布式模式时才包装 DDP。
             self.model = DDP(
@@ -86,6 +90,12 @@ class ContrastiveTrainer:
         if self.resume_path:
             self.load_checkpoint(self.resolve_path(self.resume_path))
 
+    @staticmethod
+    def count_parameters(model: torch.nn.Module) -> tuple[int, int]:
+        total = sum(param.numel() for param in model.parameters())
+        trainable = sum(param.numel() for param in model.parameters() if param.requires_grad)
+        return total, trainable
+
     def resolve_path(self, path_str: str) -> Path:
         """把相对路径统一转成基于项目根目录的绝对路径。"""
         path = Path(path_str)
@@ -119,7 +129,7 @@ class ContrastiveTrainer:
         )
 
     def build_optional_eval_loader(self, data_cfg: dict[str, Any], train_cfg: dict[str, Any], split: str):
-        """如果配置里存在验证/测试 manifest，就额外创建对应 loader。"""
+        """保留该辅助函数以兼容旧代码路径；当前对比学习阶段不使用评估 loader。"""
         manifest_path = str(data_cfg.get(f"{split}_manifest_csv", "")).strip()
         if not manifest_path:
             return None
@@ -144,7 +154,6 @@ class ContrastiveTrainer:
         eeg_ckpt = str(model_cfg["eeg_model"].get("checkpoint_path", "")).strip()
         fmri_ckpt = str(model_cfg["fmri_model"].get("checkpoint_path", "")).strip()
         model_cfg["eeg_model"]["checkpoint_path"] = str(self.resolve_path(eeg_ckpt)) if eeg_ckpt else ""
-        model_cfg["fmri_model"]["gradient_csv_path"] = str(self.resolve_path(str(model_cfg["fmri_model"]["gradient_csv_path"])))
         model_cfg["fmri_model"]["checkpoint_path"] = str(self.resolve_path(fmri_ckpt)) if fmri_ckpt else ""
         return EEGfMRIContrastiveModel(model_cfg).to(self.device)
 
@@ -184,6 +193,15 @@ class ContrastiveTrainer:
             payload.update(extra)
         torch.save(payload, self.ckpt_dir / name)
 
+    def save_metrics(self, name: str, metrics: dict[str, Any]) -> None:
+        """仅主进程保存最终指标与训练摘要。"""
+        if not is_main_process():
+            return
+        import json
+
+        with open(self.output_dir / name, "w", encoding="utf-8") as handle:
+            json.dump(metrics, handle, ensure_ascii=False, indent=2)
+
     def train_one_epoch(self, epoch: int) -> float:
         """执行一个 epoch 的对比学习训练。"""
         if self.sampler is not None:
@@ -200,6 +218,7 @@ class ContrastiveTrainer:
             eeg = batch["eeg"].to(self.device, non_blocking=True)
             fmri = batch["fmri"].to(self.device, non_blocking=True)
             self.optimizer.zero_grad(set_to_none=True)
+            optimizer_stepped = False
 
             amp_enabled = self.use_amp and self.device.type == "cuda"
             amp_dtype = torch.bfloat16 if self.amp_dtype == "bf16" else torch.float16
@@ -213,15 +232,19 @@ class ContrastiveTrainer:
                 if self.grad_clip > 0:
                     self.scaler.unscale_(self.optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                prev_scale = self.scaler.get_scale()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
+                optimizer_stepped = self.scaler.get_scale() >= prev_scale
             else:
                 loss.backward()
                 if self.grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
                 self.optimizer.step()
+                optimizer_stepped = True
 
-            self.scheduler.step()
+            if optimizer_stepped:
+                self.scheduler.step()
             running += float(loss.item())
             if is_main_process() and step % self.log_interval == 0:
                 lr = self.optimizer.param_groups[0]["lr"]
@@ -264,22 +287,27 @@ class ContrastiveTrainer:
         return metrics
 
     def fit(self) -> None:
-        """执行完整训练流程，使用验证集 loss 选择最佳模型。"""
+        """执行完整训练流程，仅基于训练 loss 选择最佳模型。"""
         best = float("inf")
+        best_epoch = 0
+        last_train_loss = float("nan")
         for epoch in range(self.start_epoch, self.epochs + 1):
             train_loss = self.train_one_epoch(epoch)
-            val_metrics = None
-            if self.val_loader is not None and epoch % self.eval_interval == 0:
-                val_metrics = self.evaluate(self.val_loader, split_name="val")
-
-            self.save_checkpoint(epoch, train_loss, f"epoch_{epoch:03d}.pth", extra={"train_loss": train_loss})
-            current_score = val_metrics["loss"] if val_metrics is not None else train_loss
+            last_train_loss = train_loss
+            current_score = train_loss
             if current_score < best:
                 best = current_score
+                best_epoch = epoch
                 extra = {"train_loss": train_loss}
-                if val_metrics is not None:
-                    extra["val_metrics"] = val_metrics
                 self.save_checkpoint(epoch, best, "best.pth", extra=extra)
+
+        final_metrics = {
+            "epochs": self.epochs,
+            "best_epoch": best_epoch,
+            "best_score": best,
+            "last_train_loss": last_train_loss,
+        }
+        self.save_metrics("final_metrics.json", final_metrics)
         cleanup_distributed()
 
     def train(self) -> None:

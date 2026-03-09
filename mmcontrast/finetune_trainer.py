@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 
 from .datasets import PairedEEGfMRIDataset
-from .distributed import cleanup_distributed, gather_tensor, init_distributed, is_dist_initialized, is_main_process
+from .distributed import cleanup_distributed, configure_runtime_devices, gather_tensor, init_distributed, is_dist_initialized, is_main_process
 from .metrics import classification_metrics
 from .models import EEGfMRIClassifier
 
@@ -22,14 +22,14 @@ class FinetuneTrainer:
     def __init__(self, cfg: dict[str, Any]):
         self.cfg = cfg
         # 需要在 CPU 上运行或显存不足时，可通过配置强制走 CPU。
-        force_cpu = bool(cfg.get("train", {}).get("force_cpu", False))
+        force_cpu = configure_runtime_devices(cfg.get("train", {}))
         self.world_size, self.rank, self.local_rank, self.device = init_distributed(force_cpu=force_cpu)
         self.project_root = Path(__file__).resolve().parent.parent
 
         train_cfg = cfg["train"]
         finetune_cfg = cfg["finetune"]
         data_cfg = cfg["data"]
-        self.fusion = str(finetune_cfg.get("fusion", "concat"))
+        self.fusion = str(finetune_cfg.get("fusion", "eeg_only"))
         selection_metric = str(finetune_cfg.get("selection_metric", "accuracy")).strip().lower()
         if selection_metric == "acc":
             selection_metric = "accuracy"
@@ -41,13 +41,13 @@ class FinetuneTrainer:
 
         train_dataset = self.build_dataset(data_cfg, split="train")
         # 多卡时由 DistributedSampler 负责切分样本，避免重复读同一数据。
-        self.sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=True) if is_dist_initialized() else None
+        self.sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=False) if is_dist_initialized() else None
         self.train_loader = self.build_loader(
             train_dataset,
             batch_size=int(train_cfg.get("batch_size", 16)),
             sampler=self.sampler,
             shuffle=self.sampler is None,
-            drop_last=True,
+            drop_last=False,
             num_workers=int(train_cfg.get("num_workers", 4)),
             pin_memory=bool(train_cfg.get("pin_memory", True)),
         )
@@ -67,10 +67,13 @@ class FinetuneTrainer:
         contrastive_ckpt = str(model_cfg["finetune"].get("contrastive_checkpoint_path", "")).strip()
         model_cfg["eeg_model"]["checkpoint_path"] = str(self.resolve_path(eeg_ckpt)) if eeg_ckpt else ""
         model_cfg["fmri_model"]["checkpoint_path"] = str(self.resolve_path(fmri_ckpt)) if fmri_ckpt else ""
-        model_cfg["fmri_model"]["gradient_csv_path"] = str(self.resolve_path(str(model_cfg["fmri_model"]["gradient_csv_path"])))
         model_cfg["finetune"]["contrastive_checkpoint_path"] = str(self.resolve_path(contrastive_ckpt)) if contrastive_ckpt else ""
 
         self.model = EEGfMRIClassifier(model_cfg).to(self.device)
+        if is_main_process():
+            total_params, trainable_params = self.count_parameters(self.model)
+            print(self.model.initialization_summary)
+            print(f"Model params: total={total_params:,}, trainable={trainable_params:,}")
         if is_dist_initialized():
             # 只有真正进入分布式模式时才包装 DDP。
             self.model = DDP(
@@ -106,6 +109,12 @@ class FinetuneTrainer:
         self.best_checkpoint_path = self.ckpt_dir / "best.pth"
         if is_main_process():
             self.ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def count_parameters(model: torch.nn.Module) -> tuple[int, int]:
+        total = sum(param.numel() for param in model.parameters())
+        trainable = sum(param.numel() for param in model.parameters() if param.requires_grad)
+        return total, trainable
 
     def resolve_path(self, path_str: str) -> Path:
         """把相对路径统一转成基于项目根目录的绝对路径。"""
@@ -204,6 +213,7 @@ class FinetuneTrainer:
             fmri = batch["fmri"].to(self.device, non_blocking=True) if "fmri" in batch else None
             labels = batch["label"].to(self.device, non_blocking=True)
             self.optimizer.zero_grad(set_to_none=True)
+            optimizer_stepped = False
 
             amp_enabled = self.use_amp and self.device.type == "cuda"
             amp_dtype = torch.bfloat16 if self.amp_dtype == "bf16" else torch.float16
@@ -217,15 +227,19 @@ class FinetuneTrainer:
                 if self.grad_clip > 0:
                     self.scaler.unscale_(self.optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                prev_scale = self.scaler.get_scale()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
+                optimizer_stepped = self.scaler.get_scale() >= prev_scale
             else:
                 loss.backward()
                 if self.grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
                 self.optimizer.step()
+                optimizer_stepped = True
 
-            self.scheduler.step()
+            if optimizer_stepped:
+                self.scheduler.step()
             running += float(loss.item())
             if is_main_process() and step % self.log_interval == 0:
                 print(f"[finetune epoch {epoch:03d} | step {step:05d}] loss={running / step:.6f}")
@@ -267,27 +281,44 @@ class FinetuneTrainer:
     def fit(self) -> None:
         """执行完整微调流程，使用验证集指标选择最佳模型，并只对最佳模型做测试。"""
         best = -1.0
+        best_epoch = 0
+        last_train_loss = float("nan")
+        last_val_metrics = None
         for epoch in range(1, self.epochs + 1):
             train_loss = self.train_one_epoch(epoch)
+            last_train_loss = train_loss
             if is_main_process():
                 print(f"Finetune epoch {epoch:03d} done: train_loss={train_loss:.6f}")
 
             val_metrics = None
             if self.val_loader is not None and epoch % self.eval_interval == 0:
                 val_metrics = self.evaluate(self.val_loader, split_name="val")
+                last_val_metrics = val_metrics
 
-            self.save_checkpoint(epoch, train_loss, f"epoch_{epoch:03d}.pth", extra={"train_loss": train_loss})
             current_score = val_metrics[self.selection_metric] if val_metrics is not None else -train_loss
             if current_score > best:
                 best = current_score
+                best_epoch = epoch
                 extra = {"train_loss": train_loss, "selection_metric": self.selection_metric}
                 if val_metrics is not None:
                     extra["val_metrics"] = val_metrics
                 self.save_checkpoint(epoch, best, "best.pth", extra=extra)
 
+        final_metrics = {
+            "epochs": self.epochs,
+            "best_epoch": best_epoch,
+            "best_score": best,
+            "selection_metric": self.selection_metric,
+            "last_train_loss": last_train_loss,
+        }
+        if last_val_metrics is not None:
+            final_metrics["last_val_metrics"] = last_val_metrics
+
         if self.test_loader is not None:
             self.load_checkpoint(self.best_checkpoint_path)
             test_metrics = self.evaluate(self.test_loader, split_name="test")
             if test_metrics is not None:
+                final_metrics["test_metrics"] = test_metrics
                 self.save_metrics("test_metrics.json", test_metrics)
+        self.save_metrics("final_metrics.json", final_metrics)
         cleanup_distributed()

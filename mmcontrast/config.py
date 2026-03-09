@@ -63,6 +63,17 @@ def _resolve_sample_shapes(manifest_path: Path, root_dir: Path | None) -> tuple[
     eeg_shape = _parse_shape_token(first_row.get("eeg_shape"))
     fmri_shape = _parse_shape_token(first_row.get("fmri_shape"))
 
+    if (eeg_shape is None or fmri_shape is None) and first_row.get("subject_path"):
+        subject_path = Path(first_row["subject_path"])
+        subject_path = subject_path if subject_path.is_absolute() else (root_dir / subject_path if root_dir else manifest_path.parent / subject_path)
+        with np.load(subject_path, allow_pickle=False) as data:
+            if eeg_shape is None and "eeg" in data:
+                eeg_data = data["eeg"]
+                eeg_shape = tuple(int(dim) for dim in eeg_data.shape[1:]) if eeg_data.ndim >= 2 else tuple(int(dim) for dim in eeg_data.shape)
+            if fmri_shape is None and "fmri" in data:
+                fmri_data = data["fmri"]
+                fmri_shape = tuple(int(dim) for dim in fmri_data.shape[1:]) if fmri_data.ndim >= 2 else tuple(int(dim) for dim in fmri_data.shape)
+
     if eeg_shape is None and first_row.get("eeg_path"):
         eeg_path = Path(first_row["eeg_path"])
         eeg_path = eeg_path if eeg_path.is_absolute() else (root_dir / eeg_path if root_dir else manifest_path.parent / eeg_path)
@@ -85,6 +96,16 @@ def _validate_manifest_shapes(
 ) -> None:
     """确保 manifest 中的样本形状与模型配置一致。"""
     eeg_shape, fmri_shape = _resolve_sample_shapes(manifest_path, root_dir)
+
+    with open(manifest_path, "r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        first_row = next(reader, None)
+    subject_packed = bool(first_row and first_row.get("subject_path"))
+
+    if subject_packed and eeg_shape is not None and len(eeg_shape) >= 4:
+        eeg_shape = eeg_shape[1:]
+    if subject_packed and fmri_shape is not None and len(fmri_shape) >= 5:
+        fmri_shape = fmri_shape[1:]
 
     expected_eeg_shape = _normalize_expected_shape(data_cfg.get("expected_eeg_shape"))
     if expected_eeg_shape is not None and eeg_shape is not None and eeg_shape != expected_eeg_shape:
@@ -113,48 +134,72 @@ def _validate_manifest_shapes(
             )
 
     if fmri_shape is not None:
-        if len(fmri_shape) == 3:
-            if fmri_shape[0] != 1:
-                raise ValueError(f"fMRI samples with 3 dims must be [1, ROI, T], but got {fmri_shape} from {manifest_path}")
-            sample_crop = (fmri_shape[1], fmri_shape[2])
-        elif len(fmri_shape) == 2:
-            sample_crop = (fmri_shape[0], fmri_shape[1])
+        fmri_input_type = str(data_cfg.get("fmri_input_type", "volume")).strip().lower()
+        if fmri_input_type == "matrix":
+            if len(fmri_shape) == 3:
+                if fmri_shape[0] != 1:
+                    raise ValueError(f"fMRI matrix samples with 3 dims must be [1, ROI, T], but got {fmri_shape} from {manifest_path}")
+                sample_crop = (fmri_shape[1], fmri_shape[2])
+            elif len(fmri_shape) == 2:
+                sample_crop = (fmri_shape[0], fmri_shape[1])
+            else:
+                raise ValueError(f"fMRI matrix samples must be [ROI, T] or [1, ROI, T], but got shape {fmri_shape} from {manifest_path}")
+
+            backbone = str(fmri_cfg.get("backbone", "neurostorm")).strip().lower()
+            if backbone == "neurostorm":
+                raise ValueError("data.fmri_input_type=matrix is incompatible with the active NeuroSTORM fMRI backbone")
+        elif fmri_input_type == "volume":
+            if len(fmri_shape) == 5:
+                sample_volume = fmri_shape[1:]
+                input_channels = fmri_shape[0]
+            elif len(fmri_shape) == 4:
+                sample_volume = fmri_shape
+                input_channels = 1
+            else:
+                raise ValueError(f"fMRI volume samples must be [H,W,D,T] or [C,H,W,D,T], but got shape {fmri_shape} from {manifest_path}")
+
+            configured_channels = int(fmri_cfg.get("in_chans", input_channels))
+            if configured_channels != input_channels:
+                raise ValueError(
+                    f"fMRI channel mismatch: manifest sample uses {input_channels} channel(s), but fmri_model.in_chans is {configured_channels}"
+                )
+
+            img_size = tuple(int(item) for item in fmri_cfg.get("img_size", data_cfg.get("fmri_target_shape", sample_volume)))
+            if len(img_size) != 4:
+                raise ValueError(f"fmri_model.img_size must be a 4-element sequence, got {img_size}")
+
+            target_shape = tuple(int(item) for item in data_cfg.get("fmri_target_shape", img_size))
+            if len(target_shape) != 4:
+                raise ValueError(f"data.fmri_target_shape must be a 4-element sequence, got {target_shape}")
+
+            if target_shape != img_size:
+                raise ValueError(f"data.fmri_target_shape {target_shape} must match fmri_model.img_size {img_size}")
+
+            spatial_strategy = str(data_cfg.get("fmri_spatial_strategy", "none")).strip().lower()
+            temporal_strategy = str(data_cfg.get("fmri_temporal_strategy", "none")).strip().lower()
+            if spatial_strategy == "none" and sample_volume[:3] != img_size[:3]:
+                raise ValueError(
+                    f"fMRI spatial shape mismatch: manifest sample uses {sample_volume[:3]}, but fmri_model.img_size expects {img_size[:3]}. "
+                    "Set data.fmri_spatial_strategy to interpolate or pad_or_crop if resizing is intended."
+                )
+            if temporal_strategy == "none" and sample_volume[3] != img_size[3]:
+                raise ValueError(
+                    f"fMRI time length mismatch: manifest sample uses {sample_volume[3]}, but fmri_model.img_size expects {img_size[3]}. "
+                    "Set data.fmri_temporal_strategy to interpolate or pad_or_crop if resizing is intended."
+                )
+
+            patch_size = tuple(int(item) for item in fmri_cfg.get("patch_size", (6, 6, 6, 1)))
+            if len(patch_size) != 4:
+                raise ValueError(f"fmri_model.patch_size must be a 4-element sequence, got {patch_size}")
+            if patch_size[3] != 1:
+                raise ValueError(f"NeuroSTORM requires fmri_model.patch_size[3] == 1, got {patch_size}")
+            for axis_size, patch in zip(img_size, patch_size):
+                if patch <= 0:
+                    raise ValueError(f"fmri_model.patch_size entries must be positive, got {patch_size}")
+                if axis_size % patch != 0:
+                    raise ValueError(f"fmri_model.img_size {img_size} must be divisible by patch_size {patch_size}")
         else:
-            raise ValueError(f"fMRI samples must be [ROI, T] or [1, ROI, T], but got shape {fmri_shape} from {manifest_path}")
-
-        crop_size = tuple(int(item) for item in fmri_cfg.get("crop_size", sample_crop))
-        if crop_size != sample_crop:
-            raise ValueError(
-                f"fMRI crop size mismatch: manifest sample uses {sample_crop}, but fmri_model.crop_size is {crop_size}"
-            )
-
-        patch_size = int(fmri_cfg.get("patch_size", 1))
-        if patch_size <= 0:
-            raise ValueError(f"fmri_model.patch_size must be positive, got {patch_size}")
-        if sample_crop[1] % patch_size != 0:
-            raise ValueError(
-                f"fMRI time length {sample_crop[1]} is not divisible by fmri_model.patch_size={patch_size}"
-            )
-
-
-def _validate_fmri_gradient_file(root: Path, fmri_cfg: dict[str, Any]) -> None:
-    """在 mapping 模式下，确保 gradient 文件的行数与 ROI 数一致。"""
-    gradient_path = root / str(fmri_cfg.get("gradient_csv_path", ""))
-    add_w = str(fmri_cfg.get("add_w", "mapping"))
-    crop_size = tuple(int(item) for item in fmri_cfg.get("crop_size", ()))
-    if len(crop_size) != 2:
-        raise ValueError(f"fmri_model.crop_size must be a 2-element sequence, got {crop_size}")
-
-    if add_w != "mapping":
-        return
-
-    gradient = np.loadtxt(gradient_path, delimiter=",", dtype=np.float32)
-    if gradient.ndim != 2:
-        raise ValueError(f"Gradient CSV must be a 2D matrix, got shape {gradient.shape} from {gradient_path}")
-    if gradient.shape[0] != crop_size[0]:
-        raise ValueError(
-            f"Gradient CSV row count {gradient.shape[0]} does not match fmri_model.crop_size[0]={crop_size[0]} in mapping mode"
-        )
+            raise ValueError(f"Unsupported data.fmri_input_type: {fmri_input_type}")
 
 
 @dataclass
@@ -211,16 +256,12 @@ class TrainConfig:
             raise FileNotFoundError(f"Dataset root_dir not found: {root_dir}")
 
         for split_key in ["val_manifest_csv", "test_manifest_csv"]:
-            split_path = str(data_cfg.get(split_key, "")).strip()
+            split_value = data_cfg.get(split_key, "")
+            split_path = "" if split_value is None else str(split_value).strip()
             if split_path:
                 resolved = root / split_path
                 if not resolved.exists():
                     raise FileNotFoundError(f"Manifest CSV not found: {resolved}")
-
-        gradient_path = root / str(fmri_cfg.get("gradient_csv_path", ""))
-        if not gradient_path.exists():
-            raise FileNotFoundError(f"Gradient CSV not found: {gradient_path}")
-        _validate_fmri_gradient_file(root=root, fmri_cfg=fmri_cfg)
 
         for checkpoint_key, cfg_section in [("EEG", eeg_cfg), ("fMRI", fmri_cfg)]:
             checkpoint_path = str(cfg_section.get("checkpoint_path", "")).strip()

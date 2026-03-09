@@ -5,6 +5,39 @@ import torch
 import torch.distributed as dist
 
 
+def configure_runtime_devices(train_cfg: dict | None = None) -> bool:
+    """根据配置设置可见 GPU，并返回是否强制使用 CPU。"""
+    train_cfg = train_cfg or {}
+    force_cpu = bool(train_cfg.get("force_cpu", False))
+    if force_cpu:
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        return True
+
+    gpu_ids = train_cfg.get("gpu_ids", [])
+    gpu_count = train_cfg.get("gpu_count", None)
+
+    normalized_gpu_ids: list[str] = []
+    if isinstance(gpu_ids, str):
+        normalized_gpu_ids = [token.strip() for token in gpu_ids.split(",") if token.strip()]
+    elif isinstance(gpu_ids, (list, tuple)):
+        normalized_gpu_ids = [str(item).strip() for item in gpu_ids if str(item).strip()]
+    elif gpu_ids not in (None, ""):
+        normalized_gpu_ids = [str(gpu_ids).strip()]
+
+    if normalized_gpu_ids:
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(normalized_gpu_ids)
+        return False
+
+    if gpu_count not in (None, ""):
+        gpu_count_int = int(gpu_count)
+        if gpu_count_int <= 0:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
+            return True
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(index) for index in range(gpu_count_int))
+
+    return False
+
+
 def init_distributed(force_cpu: bool = False) -> tuple[int, int, int, torch.device]:
     """根据环境变量初始化单卡或多卡运行上下文。"""
     world_size = int(os.environ.get("WORLD_SIZE", "1"))

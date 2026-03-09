@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .eeg_adapter import EEGCBraModAdapter
-from .fmri_adapter import FMRIBrainJEPAAdapter
+from .fmri_adapter import FMRINeuroSTORMAdapter
 
 
 class EEGfMRIContrastiveModel(nn.Module):
@@ -20,7 +20,7 @@ class EEGfMRIContrastiveModel(nn.Module):
 
         # 两个编码器各自负责把原始模态映射到特征空间。
         self.eeg_encoder = EEGCBraModAdapter(**eeg_cfg)
-        self.fmri_encoder = FMRIBrainJEPAAdapter(**fmri_cfg)
+        self.fmri_encoder = FMRINeuroSTORMAdapter(**fmri_cfg)
 
         # 投影头把两种模态的特征拉到同一个对比学习空间。
         proj_dim = int(train_cfg.get("projection_dim", 256))

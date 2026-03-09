@@ -63,7 +63,7 @@ def build_dummy_dataset(output_root: Path) -> Path:
 
 def run_loso(manifest_path: Path, output_root: Path) -> Path:
     loso_dir = output_root / "loso_subjectwise"
-    script_path = PROJECT_ROOT / "scripts" / "build_loso_splits.py"
+    script_path = PROJECT_ROOT / "preprocess" / "build_loso_splits.py"
     command = [
         sys.executable,
         str(script_path),

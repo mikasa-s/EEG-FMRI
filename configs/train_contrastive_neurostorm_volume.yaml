@@ -1,0 +1,63 @@
+train:
+  output_dir: outputs/contrastive_neurostorm_volume_ds002739_packed
+  epochs: 20
+  batch_size: 4
+  eval_batch_size: 4
+  num_workers: 2
+  pin_memory: true
+  lr: 0.0001
+  min_lr: 0.000001
+  weight_decay: 0.01
+  grad_clip: 1.0
+  use_amp: true
+  amp_dtype: fp16
+  temperature: 0.07
+  projection_dim: 256
+  log_interval: 20
+  eval_interval: 1
+  resume_path: ""
+
+data:
+  train_manifest_csv: cache/ds002739_subject_packed_eeg2_fmri6/manifest_all.csv
+  val_manifest_csv: cache/ds002739_subject_packed_eeg2_fmri6/manifest_all.csv
+  test_manifest_csv: cache/ds002739_subject_packed_eeg2_fmri6/manifest_all.csv
+  root_dir: cache/ds002739_subject_packed_eeg2_fmri6
+  expected_eeg_shape: [63, 2, 200]
+  expected_fmri_shape: [48, 48, 48, 3]
+  normalize_eeg: true
+  normalize_fmri: true
+  eeg_scale: 1.0
+  fmri_scale: 1.0
+  fmri_input_type: volume
+  fmri_target_shape: [48, 48, 48, 3]
+  fmri_spatial_strategy: pad_or_crop
+  fmri_temporal_strategy: pad_or_crop
+  fmri_pad_value: 0.0
+  fmri_normalize_nonzero_only: true
+
+eeg_model:
+  checkpoint_path: ""
+  in_dim: 200
+  out_dim: 200
+  d_model: 200
+  dim_feedforward: 800
+  seq_len: 2
+  n_layer: 12
+  nhead: 8
+  freeze_backbone: false
+
+fmri_model:
+  backbone: neurostorm
+  checkpoint_path: ""
+  img_size: [48, 48, 48, 3]
+  in_chans: 1
+  embed_dim: 24
+  first_window_size: [2, 2, 2, 2]
+  window_size: [4, 4, 4, 4]
+  patch_size: [6, 6, 6, 1]
+  depths: [2, 2, 6, 2]
+  num_heads: [3, 6, 12, 24]
+  c_multiplier: 2
+  last_layer_full_MSA: false
+  attn_drop_rate: 0.0
+  freeze_backbone: false

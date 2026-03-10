@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 
 Set-Location (Resolve-Path (Join-Path $PSScriptRoot "..\.."))
 
-$python = "D:\anaconda3\envs\mamba\python.exe"
+$python = "python"
 
 $commandLine = @("run_finetune.py", "--config", $Config)
 if (-not [string]::IsNullOrWhiteSpace($ContrastiveCheckpoint)) {

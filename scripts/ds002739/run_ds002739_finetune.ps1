@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 
 Set-Location (Resolve-Path (Join-Path $PSScriptRoot "..\.."))
 
-$python = "D:\anaconda3\envs\mamba\python.exe"
+$python = "python"
 
 Write-Host "Running finetuning for ds002739 subject-packed dataset..."
 if ([string]::IsNullOrWhiteSpace($ContrastiveCheckpoint)) {

@@ -1,8 +1,9 @@
 param(
-    [string]$DsRoot = "D:\OpenNeuro\ds002739",
+    [string]$DsRoot = "../ds002739",
     [string]$OutputRoot = "cache/ds002739",
     [string[]]$Subjects = @(),
     [string[]]$Runs = @(),
+    [int]$NumWorkers = 2,
     [ValidateSet("none", "subject", "loso")]
     [string]$SplitMode = "loso",
     [int]$TrainSubjects = 21,
@@ -16,7 +17,7 @@ $ErrorActionPreference = "Stop"
 
 Set-Location (Resolve-Path (Join-Path $PSScriptRoot "..\.."))
 
-$python = "D:\anaconda3\envs\mamba\python.exe"
+$python = "python"
 
 if ($SplitMode -ne "none" -and $Subjects.Count -gt 0) {
     $requiredSubjects = if ($SplitMode -eq "loso") { $ValSubjects + 1 } else { $TrainSubjects + $ValSubjects + $TestSubjects }
@@ -41,6 +42,7 @@ $cliArgs = @(
     "--eeg-hfreq", "40",
     "--tr", "2.0",
     "--fmri-max-shape", "48", "48", "48",
+    "--num-workers", $NumWorkers.ToString(),
     "--split-mode", $SplitMode,
     "--train-subjects", $TrainSubjects.ToString(),
     "--val-subjects", $ValSubjects.ToString(),
@@ -69,5 +71,6 @@ if ($Runs.Count -gt 0) {
 }
 
 Write-Host ("Output root: " + $OutputRoot)
+Write-Host ("Worker processes: " + $NumWorkers)
 Write-Host ("Split mode: " + $SplitMode)
 & $python @cliArgs

@@ -1,7 +1,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-Set-Location "D:\OpenNeuro\EEG-fMRI-Contrastive"
+Set-Location (Resolve-Path (Join-Path $PSScriptRoot ".."))
 
 Write-Host "Running ds002739 prepare script..."
 & ".\scripts\ds002739\prepare_ds002739.ps1"

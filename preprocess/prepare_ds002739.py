@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -68,6 +69,14 @@ class RunSummary:
     fmri_target_tr_sec: float
     valid_trial_count: int
     fmri_trial_count: int
+
+
+@dataclass(frozen=True)
+class SubjectPreparationResult:
+    subject: str
+    records: list[SampleRecord]
+    subject_record: SubjectRecord | None
+    summaries: list[RunSummary]
 
 
 def parse_args() -> argparse.Namespace:
@@ -191,6 +200,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-subjects", type=int, default=21, help="Number of subjects in train split when --split-mode=subject.")
     parser.add_argument("--val-subjects", type=int, default=2, help="Number of subjects in val split or LOSO validation subjects.")
     parser.add_argument("--test-subjects", type=int, default=1, help="Number of subjects in test split when --split-mode=subject.")
+    parser.add_argument("--num-workers", type=int, default=1, help="Number of subject-level worker processes. Use 1 to keep processing serial.")
     return parser.parse_args()
 
 
@@ -583,6 +593,204 @@ def iter_subject_runs(subjects: Iterable[str], ds_root: Path, requested_runs: li
             yield subject, run
 
 
+def prepare_subject(
+    subject: str,
+    ds_root: Path,
+    out_root: Path,
+    requested_runs: list[str] | None,
+    electrode_template: list[str],
+    common_electrodes: list[str],
+    labels_img: str,
+    args: argparse.Namespace,
+) -> SubjectPreparationResult:
+    eeg_out_dir = out_root / "eeg"
+    fmri_out_dir = out_root / "fmri"
+    packed_out_dir = out_root / "subjects"
+    packed_eeg_samples: list[np.ndarray] = []
+    packed_fmri_samples: list[np.ndarray] = []
+    packed_labels: list[int] = []
+    packed_trial_indices: list[int] = []
+    packed_runs: list[str] = []
+    packed_sample_ids: list[str] = []
+    records: list[SampleRecord] = []
+    summaries: list[RunSummary] = []
+    eeg_seq_len, eeg_patch_len = resolve_eeg_patch_params(args=args)
+
+    for _, run in iter_subject_runs([subject], ds_root, requested_runs):
+        func_dir = ds_root / subject / "func"
+        eeg_dir = ds_root / subject / "EEG"
+        bold_path = func_dir / f"{subject}_task-main_{run}_bold.nii.gz"
+        fmri_events_path = func_dir / f"{subject}_task-main_{run}_events.tsv"
+        eeg_data_path = eeg_dir / f"EEG_data_{subject}_{run}.mat"
+        eeg_events_path = eeg_dir / f"EEG_events_{subject}_{run}.mat"
+        if not all(path.exists() for path in [bold_path, fmri_events_path, eeg_data_path, eeg_events_path]):
+            continue
+
+        raw_eeg_data, raw_sfreq = load_eeg_data(eeg_data_path, electrode_template=electrode_template, common_electrodes=common_electrodes)
+        eeg_data, processed_sfreq = preprocess_eeg(raw_eeg_data, source_sfreq=raw_sfreq, args=args)
+        eeg_events = load_eeg_events(eeg_events_path)
+        eeg_trials = build_eeg_trial_table(eeg_events)
+        fmri_events = load_fmri_events(fmri_events_path, event_type=args.fmri_event_type)
+        if fmri_events.empty:
+            continue
+
+        if args.fmri_mode == "roi":
+            fmri_source, bold_shape, voxel_size = extract_roi_timeseries(
+                fmri_nii_path=bold_path,
+                labels_img=labels_img,
+                tr=args.tr,
+                standardize_fmri=args.standardize_fmri,
+            )
+        else:
+            raw_fmri, bold_shape, voxel_size = load_bold_volume(bold_path)
+            fmri_source = preprocess_fmri_volume(raw_fmri, voxel_size=voxel_size, source_tr=float(voxel_size[3]), args=args)
+
+        pair_count = min(len(eeg_trials), len(fmri_events))
+        if pair_count == 0:
+            continue
+        eeg_trials = eeg_trials.iloc[:pair_count].reset_index(drop=True)
+        fmri_events = fmri_events.iloc[:pair_count].reset_index(drop=True)
+
+        eeg_fmri_offset_sec = estimate_eeg_fmri_offset_sec(eeg_trials=eeg_trials, fmri_events=fmri_events)
+        event_counts = {args.fmri_event_type: int(len(fmri_events))}
+        summaries.append(
+            RunSummary(
+                subject=subject,
+                run=run,
+                bold_shape="x".join(str(dim) for dim in bold_shape),
+                voxel_size="x".join(str(dim) for dim in voxel_size),
+                exported_fmri_shape="x".join(str(dim) for dim in fmri_source.shape),
+                eeg_shape="x".join(str(dim) for dim in eeg_data.shape),
+                eeg_fmri_offset_sec=eeg_fmri_offset_sec,
+                event_counts=str(event_counts),
+                eeg_sfreq_hz=processed_sfreq,
+                fmri_target_tr_sec=float(args.tr),
+                valid_trial_count=int(len(eeg_trials)),
+                fmri_trial_count=int(len(fmri_events)),
+            )
+        )
+
+        eeg_onsets = eeg_trials["eeg_onset_sec"].to_numpy(dtype=np.float64)
+        fmri_onsets = fmri_events["onset"].to_numpy(dtype=np.float64)
+        for event_index, trial_row in eeg_trials.iterrows():
+            trial_type = "dot_stim_validtrials"
+            label = int(trial_row["label"])
+            label_name = str(trial_row["label_name"])
+            eeg_window_length_sec = compute_event_window_sec(
+                eeg_onsets,
+                event_index=event_index,
+                max_window_sec=float(args.eeg_window_sec) if args.eeg_window_sec is not None else float(args.window_sec),
+                margin_sec=float(args.window_margin_sec),
+                min_window_sec=float(args.min_window_sec),
+            )
+            fmri_window_length_sec = compute_event_window_sec(
+                fmri_onsets,
+                event_index=event_index,
+                max_window_sec=float(args.fmri_window_sec) if args.fmri_window_sec is not None else float(args.window_sec),
+                margin_sec=float(args.window_margin_sec),
+                min_window_sec=float(args.min_window_sec),
+            )
+            if eeg_window_length_sec is None or fmri_window_length_sec is None:
+                continue
+
+            eeg_onset_sec = float(trial_row["eeg_onset_sec"])
+            fmri_onset_sec = float(fmri_events.iloc[event_index]["onset"])
+
+            try:
+                eeg_window = slice_eeg_window(
+                    eeg_data,
+                    sfreq=processed_sfreq,
+                    start_sec=eeg_onset_sec,
+                    duration_sec=eeg_window_length_sec,
+                )
+                if args.eeg_mode == "patched":
+                    eeg_window = maybe_patch_eeg(eeg_window, seq_len=eeg_seq_len, patch_len=eeg_patch_len)
+
+                if args.fmri_mode == "roi":
+                    fmri_window = slice_fmri_window(
+                        fmri_source,
+                        tr=args.tr,
+                        start_sec=fmri_onset_sec,
+                        duration_sec=fmri_window_length_sec,
+                    )
+                else:
+                    fmri_window = slice_fmri_volume_window(
+                        fmri_source,
+                        tr=args.tr,
+                        start_sec=fmri_onset_sec,
+                        duration_sec=fmri_window_length_sec,
+                    )
+            except ValueError:
+                continue
+
+            sample_id = f"{subject}_{run}_trial_{int(trial_row['trial_index']):03d}_{label_name}"
+
+            if args.pack_subject_files:
+                packed_eeg_samples.append(eeg_window.astype(np.float32))
+                packed_fmri_samples.append(fmri_window.astype(np.float32))
+                packed_labels.append(label)
+                packed_trial_indices.append(int(trial_row["trial_index"]))
+                packed_runs.append(run)
+                packed_sample_ids.append(sample_id)
+            else:
+                eeg_out_path = eeg_out_dir / f"{sample_id}.npy"
+                fmri_out_path = fmri_out_dir / f"{sample_id}.npy"
+                np.save(eeg_out_path, eeg_window.astype(np.float32))
+                np.save(fmri_out_path, fmri_window)
+
+                records.append(
+                    build_sample_record(
+                        sample_id=sample_id,
+                        subject=subject,
+                        run=run,
+                        trial_type=trial_type,
+                        eeg_rel_path=eeg_out_path.relative_to(out_root),
+                        fmri_rel_path=fmri_out_path.relative_to(out_root),
+                        label=label,
+                        label_name=label_name,
+                        eeg=eeg_window,
+                        fmri=fmri_window,
+                        window_sec=eeg_window_length_sec,
+                        trial_index=int(trial_row["trial_index"]),
+                    )
+                )
+
+    subject_record: SubjectRecord | None = None
+    if args.pack_subject_files and packed_eeg_samples:
+        packed_eeg = stack_subject_samples(packed_eeg_samples, name="EEG")
+        packed_fmri = stack_subject_samples(packed_fmri_samples, name="fMRI")
+        packed_labels_array = np.asarray(packed_labels, dtype=np.int64)
+        packed_trial_indices_array = np.asarray(packed_trial_indices, dtype=np.int64)
+        packed_runs_array = np.asarray(packed_runs)
+        packed_sample_ids_array = np.asarray(packed_sample_ids)
+
+        subject_path = packed_out_dir / f"{subject}.npz"
+        np.savez(
+            subject_path,
+            eeg=packed_eeg,
+            fmri=packed_fmri,
+            labels=packed_labels_array,
+            trial_index=packed_trial_indices_array,
+            run=packed_runs_array,
+            sample_id=packed_sample_ids_array,
+        )
+        subject_record = SubjectRecord(
+            subject=subject,
+            subject_path=subject_path.relative_to(out_root).as_posix(),
+            sample_count=int(packed_labels_array.shape[0]),
+            eeg_shape="x".join(str(dim) for dim in packed_eeg.shape),
+            fmri_shape="x".join(str(dim) for dim in packed_fmri.shape),
+            label_shape="x".join(str(dim) for dim in packed_labels_array.shape),
+        )
+
+    return SubjectPreparationResult(
+        subject=subject,
+        records=records,
+        subject_record=subject_record,
+        summaries=summaries,
+    )
+
+
 def main() -> None:
     args = parse_args()
     if args.window_sec <= 0:
@@ -594,6 +802,8 @@ def main() -> None:
     fmri_window_sec = float(args.fmri_window_sec) if args.fmri_window_sec is not None else float(args.window_sec)
     if eeg_window_sec <= 0 or fmri_window_sec <= 0:
         raise ValueError("--eeg-window-sec and --fmri-window-sec must be positive when provided")
+    if args.num_workers <= 0:
+        raise ValueError("--num-workers must be a positive integer")
 
     ds_root = args.ds_root.resolve()
     out_root = args.output_root.resolve()
@@ -617,192 +827,57 @@ def main() -> None:
     records: list[SampleRecord] = []
     subject_records: list[SubjectRecord] = []
     summaries: list[RunSummary] = []
-    eeg_seq_len, eeg_patch_len = resolve_eeg_patch_params(args=args)
-
-    for subject in tqdm(subjects, desc="Preparing ds002739"):
-        packed_eeg_samples: list[np.ndarray] = []
-        packed_fmri_samples: list[np.ndarray] = []
-        packed_labels: list[int] = []
-        packed_trial_indices: list[int] = []
-        packed_runs: list[str] = []
-        packed_sample_ids: list[str] = []
-
-        for _, run in iter_subject_runs([subject], ds_root, args.runs):
-            func_dir = ds_root / subject / "func"
-            eeg_dir = ds_root / subject / "EEG"
-            bold_path = func_dir / f"{subject}_task-main_{run}_bold.nii.gz"
-            fmri_events_path = func_dir / f"{subject}_task-main_{run}_events.tsv"
-            eeg_data_path = eeg_dir / f"EEG_data_{subject}_{run}.mat"
-            eeg_events_path = eeg_dir / f"EEG_events_{subject}_{run}.mat"
-            if not all(path.exists() for path in [bold_path, fmri_events_path, eeg_data_path, eeg_events_path]):
-                continue
-
-            raw_eeg_data, raw_sfreq = load_eeg_data(eeg_data_path, electrode_template=electrode_template, common_electrodes=common_electrodes)
-            eeg_data, processed_sfreq = preprocess_eeg(raw_eeg_data, source_sfreq=raw_sfreq, args=args)
-            eeg_events = load_eeg_events(eeg_events_path)
-            eeg_trials = build_eeg_trial_table(eeg_events)
-            fmri_events = load_fmri_events(fmri_events_path, event_type=args.fmri_event_type)
-            if fmri_events.empty:
-                continue
-
-            if args.fmri_mode == "roi":
-                fmri_source, bold_shape, voxel_size = extract_roi_timeseries(
-                    fmri_nii_path=bold_path,
-                    labels_img=labels_img,
-                    tr=args.tr,
-                    standardize_fmri=args.standardize_fmri,
-                )
-            else:
-                raw_fmri, bold_shape, voxel_size = load_bold_volume(bold_path)
-                fmri_source = preprocess_fmri_volume(raw_fmri, voxel_size=voxel_size, source_tr=float(voxel_size[3]), args=args)
-
-            pair_count = min(len(eeg_trials), len(fmri_events))
-            if pair_count == 0:
-                continue
-            eeg_trials = eeg_trials.iloc[:pair_count].reset_index(drop=True)
-            fmri_events = fmri_events.iloc[:pair_count].reset_index(drop=True)
-
-            eeg_fmri_offset_sec = estimate_eeg_fmri_offset_sec(eeg_trials=eeg_trials, fmri_events=fmri_events)
-            event_counts = {args.fmri_event_type: int(len(fmri_events))}
-            summaries.append(
-                RunSummary(
-                    subject=subject,
-                    run=run,
-                    bold_shape="x".join(str(dim) for dim in bold_shape),
-                    voxel_size="x".join(str(dim) for dim in voxel_size),
-                    exported_fmri_shape="x".join(str(dim) for dim in fmri_source.shape),
-                    eeg_shape="x".join(str(dim) for dim in eeg_data.shape),
-                    eeg_fmri_offset_sec=eeg_fmri_offset_sec,
-                    event_counts=str(event_counts),
-                    eeg_sfreq_hz=processed_sfreq,
-                    fmri_target_tr_sec=float(args.tr),
-                    valid_trial_count=int(len(eeg_trials)),
-                    fmri_trial_count=int(len(fmri_events)),
-                )
+    max_workers = min(int(args.num_workers), max(len(subjects), 1))
+    if max_workers > 1 and len(subjects) > 1:
+        print(f"Preparing ds002739 with {max_workers} worker processes.")
+        subject_results: list[SubjectPreparationResult] = []
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+            future_to_subject = {
+                executor.submit(
+                    prepare_subject,
+                    subject,
+                    ds_root,
+                    out_root,
+                    args.runs,
+                    electrode_template,
+                    common_electrodes,
+                    labels_img,
+                    args,
+                ): subject
+                for subject in subjects
+            }
+            for future in tqdm(concurrent.futures.as_completed(future_to_subject), total=len(future_to_subject), desc="Preparing ds002739"):
+                subject_results.append(future.result())
+    else:
+        subject_results = [
+            prepare_subject(
+                subject,
+                ds_root,
+                out_root,
+                args.runs,
+                electrode_template,
+                common_electrodes,
+                labels_img,
+                args,
             )
+            for subject in tqdm(subjects, desc="Preparing ds002739")
+        ]
 
-            eeg_onsets = eeg_trials["eeg_onset_sec"].to_numpy(dtype=np.float64)
-            fmri_onsets = fmri_events["onset"].to_numpy(dtype=np.float64)
-            for event_index, trial_row in eeg_trials.iterrows():
-                trial_type = "dot_stim_validtrials"
-                label = int(trial_row["label"])
-                label_name = str(trial_row["label_name"])
-                eeg_window_length_sec = compute_event_window_sec(
-                    eeg_onsets,
-                    event_index=event_index,
-                    max_window_sec=eeg_window_sec,
-                    margin_sec=float(args.window_margin_sec),
-                    min_window_sec=float(args.min_window_sec),
-                )
-                fmri_window_length_sec = compute_event_window_sec(
-                    fmri_onsets,
-                    event_index=event_index,
-                    max_window_sec=fmri_window_sec,
-                    margin_sec=float(args.window_margin_sec),
-                    min_window_sec=float(args.min_window_sec),
-                )
-                if eeg_window_length_sec is None or fmri_window_length_sec is None:
-                    continue
-
-                eeg_onset_sec = float(trial_row["eeg_onset_sec"])
-                fmri_onset_sec = float(fmri_events.iloc[event_index]["onset"])
-
-                try:
-                    eeg_window = slice_eeg_window(
-                        eeg_data,
-                        sfreq=processed_sfreq,
-                        start_sec=eeg_onset_sec,
-                        duration_sec=eeg_window_length_sec,
-                    )
-                    if args.eeg_mode == "patched":
-                        eeg_window = maybe_patch_eeg(eeg_window, seq_len=eeg_seq_len, patch_len=eeg_patch_len)
-
-                    if args.fmri_mode == "roi":
-                        fmri_window = slice_fmri_window(
-                            fmri_source,
-                            tr=args.tr,
-                            start_sec=fmri_onset_sec,
-                            duration_sec=fmri_window_length_sec,
-                        )
-                    else:
-                        fmri_window = slice_fmri_volume_window(
-                            fmri_source,
-                            tr=args.tr,
-                            start_sec=fmri_onset_sec,
-                            duration_sec=fmri_window_length_sec,
-                        )
-                except ValueError:
-                    continue
-
-                sample_id = f"{subject}_{run}_trial_{int(trial_row['trial_index']):03d}_{label_name}"
-
-                if args.pack_subject_files:
-                    packed_eeg_samples.append(eeg_window.astype(np.float32))
-                    packed_fmri_samples.append(fmri_window.astype(np.float32))
-                    packed_labels.append(label)
-                    packed_trial_indices.append(int(trial_row["trial_index"]))
-                    packed_runs.append(run)
-                    packed_sample_ids.append(sample_id)
-                else:
-                    eeg_out_path = eeg_out_dir / f"{sample_id}.npy"
-                    fmri_out_path = fmri_out_dir / f"{sample_id}.npy"
-                    np.save(eeg_out_path, eeg_window.astype(np.float32))
-                    np.save(fmri_out_path, fmri_window)
-
-                    records.append(
-                        build_sample_record(
-                            sample_id=sample_id,
-                            subject=subject,
-                            run=run,
-                            trial_type=trial_type,
-                            eeg_rel_path=eeg_out_path.relative_to(out_root),
-                            fmri_rel_path=fmri_out_path.relative_to(out_root),
-                            label=label,
-                            label_name=label_name,
-                            eeg=eeg_window,
-                            fmri=fmri_window,
-                            window_sec=eeg_window_length_sec,
-                            trial_index=int(trial_row["trial_index"]),
-                        )
-                    )
-
-        if args.pack_subject_files and packed_eeg_samples:
-            packed_eeg = stack_subject_samples(packed_eeg_samples, name="EEG")
-            packed_fmri = stack_subject_samples(packed_fmri_samples, name="fMRI")
-            packed_labels_array = np.asarray(packed_labels, dtype=np.int64)
-            packed_trial_indices_array = np.asarray(packed_trial_indices, dtype=np.int64)
-            packed_runs_array = np.asarray(packed_runs)
-            packed_sample_ids_array = np.asarray(packed_sample_ids)
-
-            subject_path = packed_out_dir / f"{subject}.npz"
-            np.savez(
-                subject_path,
-                eeg=packed_eeg,
-                fmri=packed_fmri,
-                labels=packed_labels_array,
-                trial_index=packed_trial_indices_array,
-                run=packed_runs_array,
-                sample_id=packed_sample_ids_array,
-            )
-            subject_records.append(
-                SubjectRecord(
-                    subject=subject,
-                    subject_path=subject_path.relative_to(out_root).as_posix(),
-                    sample_count=int(packed_labels_array.shape[0]),
-                    eeg_shape="x".join(str(dim) for dim in packed_eeg.shape),
-                    fmri_shape="x".join(str(dim) for dim in packed_fmri.shape),
-                    label_shape="x".join(str(dim) for dim in packed_labels_array.shape),
-                )
-            )
+    subject_order = {subject: index for index, subject in enumerate(subjects)}
+    for result in sorted(subject_results, key=lambda item: subject_order[item.subject]):
+        records.extend(result.records)
+        summaries.extend(result.summaries)
+        if result.subject_record is not None:
+            subject_records.append(result.subject_record)
 
     if not records and not subject_records:
         raise RuntimeError("No samples were exported. Check subject IDs, run IDs, event definitions, and window settings.")
 
     if subject_records:
-        pd.DataFrame(record.__dict__ for record in subject_records).to_csv(out_root / "manifest_all.csv", index=False)
+        pd.DataFrame(record.__dict__ for record in sorted(subject_records, key=lambda item: item.subject)).to_csv(out_root / "manifest_all.csv", index=False)
     else:
-        pd.DataFrame(record.__dict__ for record in records).to_csv(out_root / "manifest_all.csv", index=False)
-    pd.DataFrame(summary.__dict__ for summary in summaries).to_csv(out_root / "run_summary.csv", index=False)
+        pd.DataFrame(record.__dict__ for record in sorted(records, key=lambda item: item.sample_id)).to_csv(out_root / "manifest_all.csv", index=False)
+    pd.DataFrame(summary.__dict__ for summary in sorted(summaries, key=lambda item: (item.subject, item.run))).to_csv(out_root / "run_summary.csv", index=False)
 
     manifest_path = out_root / "manifest_all.csv"
     if args.split_mode == "subject":

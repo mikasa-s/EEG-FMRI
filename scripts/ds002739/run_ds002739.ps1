@@ -51,7 +51,7 @@ function Get-StdValue {
 $ErrorActionPreference = "Stop"
 Set-Location (Resolve-Path (Join-Path $PSScriptRoot "..\.."))
 
-$python = "D:\anaconda3\envs\mamba\python.exe"
+$python = "python"
 $losoPath = Resolve-Path $LosoDir
 $dataPath = Resolve-Path $DataRoot
 $outputPath = Join-Path (Get-Location) $OutputRoot

@@ -1,5 +1,5 @@
 param(
-    [string]$DsRoot = "D:\OpenNeuro\ds002336",
+    [string]$DsRoot = "../ds002336",
     [string]$OutputRoot = "cache/ds002336",
     [string[]]$Subjects = @(),
     [string[]]$Tasks = @("motorloc", "MIpre", "MIpost", "eegNF", "fmriNF", "eegfmriNF"),

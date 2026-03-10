@@ -1,5 +1,5 @@
 param(
-    [string]$DsRoot = "D:\OpenNeuro\ds002336",
+    [string]$DsRoot = "../ds002336",
     [string]$OutputRoot = "cache/ds002336",
     [string[]]$Subjects = @(),
     [string[]]$Tasks = @("motorloc", "MIpre", "MIpost", "eegNF", "fmriNF", "eegfmriNF"),
@@ -20,7 +20,7 @@ $ErrorActionPreference = "Stop"
 
 Set-Location (Resolve-Path (Join-Path $PSScriptRoot "..\.."))
 
-$python = "D:\anaconda3\envs\mamba\python.exe"
+$python = "python"
 
 if ($SplitMode -ne "none" -and $Subjects.Count -gt 0) {
     $requiredSubjects = if ($SplitMode -eq "loso") { $ValSubjects + 1 } else { $TrainSubjects + $ValSubjects + $TestSubjects }

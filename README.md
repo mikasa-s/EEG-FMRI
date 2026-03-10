@@ -56,9 +56,10 @@ EEG-fMRI-Contrastive/
 
 ## 4. 环境安装
 
-建议先安装依赖：
+建议先进入仓库根目录，再安装依赖：
 
 ```bash
+cd EEG-fMRI-Contrastive
 pip install -r requirements.txt
 ```
 
@@ -69,7 +70,74 @@ NeuroSTORM 路径至少需要：
 
 mamba-ssm 已加入 requirements，但在 Windows 上不一定总能直接安装成功。当前仓库内置了一个轻量 fallback mixer，缺少 mamba-ssm 时仍可跑通结构；如果你要尽量贴近原版 NeuroSTORM，仍建议安装 mamba-ssm。
 
-## 5. 数据接入
+## 5. 快速开始
+
+下面所有命令都默认在仓库根目录执行。
+
+推荐启动方式：
+
+```powershell
+cd EEG-fMRI-Contrastive
+```
+
+默认路径约定：
+
+- 仓库目录是 `EEG-fMRI-Contrastive/`
+- `ds002336/` 和 `ds002739/` 默认与仓库目录同级
+- 缓存、日志、训练输出默认都写在仓库内部的 `cache/`、`outputs/` 等相对目录下
+- PowerShell 脚本直接调用当前终端里的 `python`
+
+### 5.1 处理 ds002739
+
+处理全部被试，按被试并行，`-NumWorkers` 控制并行进程数：
+
+```powershell
+.\scripts\ds002739\prepare_ds002739.ps1 -NumWorkers 8
+```
+
+如果你想单独指定输出目录，避免覆盖当前缓存：
+
+```powershell
+.\scripts\ds002739\prepare_ds002739.ps1 -NumWorkers 8 -OutputRoot cache\ds002739_parallel
+```
+
+如果只想处理部分被试：
+
+```powershell
+.\scripts\ds002739\prepare_ds002739.ps1 -Subjects sub-09 sub-13 -NumWorkers 2 -SplitMode none
+```
+
+### 5.2 处理 ds002336
+
+如果你直接使用原始 fMRI 做 Python 预处理：
+
+```powershell
+.\scripts\ds002336\prepare_ds002336.ps1
+```
+
+如果你使用 SPM12 预处理后的 fMRI，这是当前更推荐的路径。这个命令会先跑全部人的 SPM12 预处理，再自动生成模型输入缓存：
+
+```powershell
+.\scripts\ds002336\prepare_ds002336_spm.ps1 -ParallelJobs 4
+```
+
+说明：
+
+- `-ParallelJobs` 控制同时启动多少个 MATLAB 进程。
+- 这个脚本要求本机已经能直接调用 `matlab`，并且 SPM12 已可用。
+- 当前 Python 侧会优先读取 `derivatives/spm12_preproc` 下的最终 NIfTI，不会再回退去读原始 fMRI，除非你显式改脚本参数。
+
+### 5.3 一次性顺序处理两个数据集
+
+如果你只是想顺序执行仓库默认的数据准备脚本：
+
+```powershell
+.\scripts\run_prepare_all.ps1
+```
+
+这个脚本会先处理 ds002739，再处理 ds002336。它本身不额外传并行参数；如果你需要并行控制，优先直接调用各自的数据集脚本。
+
+## 6. 数据接入
 
 Manifest CSV 必需列：
 
@@ -91,7 +159,7 @@ s0001,eeg/sample_0001.npy,fmri/sample_0001.npy,0
 s0002,eeg/sample_0002.npy,fmri/sample_0002.npy,1
 ```
 
-## 6. 关键配置
+## 7. 关键配置
 
 当前默认训练配置：
 
@@ -127,31 +195,81 @@ s0002,eeg/sample_0002.npy,fmri/sample_0002.npy,1
 - img_size 必须能被 patch_size 整除
 - 如果 manifest 中的原始体积尺寸与 img_size 不同，必须显式打开 spatial 或 temporal 缩放策略，否则启动前就会报错
 
-## 7. 训练入口
+## 8. 训练与微调命令
 
-默认对比学习：
+### 8.1 ds002739 对比学习
 
-```bash
-python run_train.py
+直接用仓库默认配置启动：
+
+```powershell
+.\scripts\ds002739\run_ds002739_contrastive.ps1
 ```
 
-默认分类微调：
+默认配置文件是：
 
-```bash
-python run_finetune.py
+- `configs/train_ds002739.yaml`
+
+如果你想改配置文件：
+
+```powershell
+.\scripts\ds002739\run_ds002739_contrastive.ps1 -Config configs\train_ds002739.yaml
 ```
 
-也可以覆盖常用字段：
+### 8.2 ds002739 分类微调
+
+如果你已经有对比学习得到的 checkpoint，直接传进去：
+
+```powershell
+.\scripts\ds002739\run_ds002739_finetune.ps1 -ContrastiveCheckpoint .\outputs\ds002739\contrastive\checkpoints\best.pth
+```
+
+如果不传 `-ContrastiveCheckpoint`，就会按配置或随机初始化进入微调。
+
+默认配置文件是：
+
+- `configs/finetune_ds002739.yaml`
+
+### 8.3 ds002336 对比学习
+
+```powershell
+.\scripts\ds002336\run_ds002336_contrastive.ps1
+```
+
+默认配置文件是：
+
+- `configs/train_ds002336.yaml`
+
+### 8.4 ds002336 分类微调
+
+```powershell
+.\scripts\ds002336\run_ds002336_finetune.ps1 -ContrastiveCheckpoint .\outputs\ds002336\contrastive\checkpoints\best.pth
+```
+
+默认配置文件是：
+
+- `configs/finetune_ds002336.yaml`
+
+### 8.5 直接用 Python 入口
+
+如果你不想走 PowerShell 包装脚本，也可以直接调 Python：
 
 ```bash
-python run_train.py --config configs/train_contrastive_neurostorm_volume.yaml --train-manifest outputs/volume_dataset/manifest_train.csv --val-manifest outputs/volume_dataset/manifest_val.csv --root-dir outputs/volume_dataset --output-dir outputs/contrastive_volume_run2 --set data.fmri_spatial_strategy='interpolate' --set data.fmri_temporal_strategy='pad_or_crop'
+python run_train.py --config configs/train_ds002739.yaml
 ```
 
 ```bash
-python run_finetune.py --config configs/finetune_classifier_neurostorm_volume.yaml --train-manifest outputs/volume_dataset/manifest_train.csv --val-manifest outputs/volume_dataset/manifest_val.csv --test-manifest outputs/volume_dataset/manifest_test.csv --root-dir outputs/volume_dataset --contrastive-checkpoint outputs/contrastive_neurostorm_volume/checkpoints/best.pth
+python run_finetune.py --config configs/finetune_ds002739.yaml --contrastive-checkpoint outputs/ds002739/contrastive/checkpoints/best.pth
 ```
 
-## 8. 当前实现边界
+```bash
+python run_train.py --config configs/train_ds002336.yaml
+```
+
+```bash
+python run_finetune.py --config configs/finetune_ds002336.yaml --contrastive-checkpoint outputs/ds002336/contrastive/checkpoints/best.pth
+```
+
+## 9. 当前实现边界
 
 - 当前默认路径已经切到 NeuroSTORM volume 输入。
 - 旧的 Brain-JEPA 相关配置文件仍在仓库里，但不再是默认入口。

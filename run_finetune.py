@@ -34,6 +34,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--eeg-baseline-category", type=str, default="")
+    parser.add_argument("--eeg-baseline-model", type=str, default="")
     parser.add_argument("--test-only", action="store_true")
     parser.add_argument("--force-cpu", action="store_true")
     parser.add_argument(
@@ -86,6 +88,13 @@ def apply_overrides(config: dict, args: argparse.Namespace) -> dict:
         if value not in (None, ""):
             assign_nested_value(config, dotted_key, value)
 
+    if args.eeg_baseline_category.strip() or args.eeg_baseline_model.strip():
+        assign_nested_value(config, "finetune.eeg_baseline.enabled", True)
+    if args.eeg_baseline_category.strip():
+        assign_nested_value(config, "finetune.eeg_baseline.category", args.eeg_baseline_category.strip())
+    if args.eeg_baseline_model.strip():
+        assign_nested_value(config, "finetune.eeg_baseline.model_name", args.eeg_baseline_model.strip())
+
     if args.force_cpu:
         assign_nested_value(config, "train.force_cpu", True)
 
@@ -123,7 +132,10 @@ def main() -> None:
     config = load_yaml_config(config_path)
     resolved_config = apply_overrides(config, args)
     runtime_config_path = write_runtime_config(resolved_config, config_path)
-    run_finetuning(str(runtime_config_path))
+    try:
+        run_finetuning(str(runtime_config_path))
+    finally:
+        runtime_config_path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

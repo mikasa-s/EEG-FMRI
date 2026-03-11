@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-from mmcontrast.runner import run_training
+from mmcontrast.contrastive_runner import run_contrastive_training
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 # 允许直接从项目根目录执行脚本，而不依赖外部 PYTHONPATH 配置。
@@ -115,7 +115,7 @@ def main() -> None:
     config = load_yaml_config(config_path)
     resolved_config = apply_overrides(config, args)
     runtime_config_path = write_runtime_config(resolved_config, config_path)
-    run_training(str(runtime_config_path))
+    run_contrastive_training(str(runtime_config_path))
 
 
 if __name__ == "__main__":

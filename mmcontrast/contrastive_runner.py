@@ -5,12 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config import TrainConfig
+from .contrastive_trainer import ContrastiveTrainer
 from .distributed import get_rank
-from .trainer import ContrastiveTrainer
 
 
-def run_training(config_path: str) -> None:
-    """完成配置加载、校验、配置落盘，再交给训练器执行。"""
+def run_contrastive_training(config_path: str) -> None:
+    """完成配置加载、校验、配置落盘，再交给对比学习训练器执行。"""
     cfg = TrainConfig.load(config_path)
     cfg.validate(base_dir=str(Path(config_path).resolve().parent.parent))
 

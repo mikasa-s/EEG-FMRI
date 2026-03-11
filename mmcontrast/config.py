@@ -305,5 +305,23 @@ class TrainConfig:
                 resolved = root / contrastive_checkpoint
                 if not resolved.exists():
                     raise FileNotFoundError(f"Contrastive checkpoint not found: {resolved}")
+            eeg_baseline_cfg = finetune_cfg.get("eeg_baseline", {}) or {}
+            if bool(eeg_baseline_cfg.get("enabled", False)):
+                category = str(eeg_baseline_cfg.get("category", "foundation")).strip().lower()
+                model_name = str(eeg_baseline_cfg.get("model_name", "cbramod")).strip().lower()
+                fusion = str(finetune_cfg.get("fusion", "eeg_only")).strip().lower()
+                if category not in {"traditional", "foundation"}:
+                    raise ValueError("finetune.eeg_baseline.category must be one of: traditional, foundation")
+                valid_models = {
+                    "traditional": {"conv1d", "cnn", "shallowconv1d", "lstm", "bilstm"},
+                    "foundation": {"cbramod", "patch_mlp", "mlp"},
+                }
+                if model_name not in valid_models[category]:
+                    raise ValueError(
+                        f"Unsupported finetune.eeg_baseline.model_name='{model_name}' for category='{category}'"
+                    )
+                if category == "traditional" and fusion != "eeg_only":
+                    raise ValueError("Traditional EEG baselines only support finetune.fusion=eeg_only")
+
 
         _validate_manifest_shapes(manifest_path=manifest_path, root_dir=root_dir, eeg_cfg=eeg_cfg, fmri_cfg=fmri_cfg, data_cfg=data_cfg)

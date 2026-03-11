@@ -36,6 +36,10 @@ def _center_pad_or_crop_axis(array: np.ndarray, axis: int, target_size: int, pad
 
 def center_pad_or_crop_volume(fmri: np.ndarray, target_shape: Sequence[int], pad_value: float = 0.0) -> np.ndarray:
 	"""Center crop or zero-pad a [C,H,W,D,T] volume to the target shape."""
+	target_shape = tuple(int(item) for item in target_shape)
+	if fmri.shape[1:] == target_shape:
+		return fmri.astype(np.float32, copy=False)
+
 	output = fmri
 	for axis, target_size in enumerate(target_shape, start=1):
 		output = _center_pad_or_crop_axis(output, axis=axis, target_size=int(target_size), pad_value=pad_value)
@@ -72,6 +76,9 @@ def resize_volume_by_strategy(
 		raise ValueError(f"fmri_target_shape must contain 4 integers, got {target_shape}")
 
 	current_shape = fmri.shape[1:]
+	if current_shape == target_shape:
+		return fmri.astype(np.float32, copy=False)
+
 	spatial_target = target_shape[:3]
 	time_target = target_shape[3]
 	output = fmri

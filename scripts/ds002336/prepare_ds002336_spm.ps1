@@ -139,7 +139,6 @@ function Invoke-SpmMatlabForeground {
 }
 
 $workspaceRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
-$repoParent = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
 $matlabScriptDir = Resolve-Path (Join-Path $workspaceRoot "preprocess")
 $logDir = Join-Path $workspaceRoot "outputs\logs\ds002336_spm"
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
@@ -196,8 +195,7 @@ $prepareArgs = @{
     EegSeqLen     = $EegSeqLen
     EegPatchLen   = $EegPatchLen
     DropEcg       = $DropEcg
-    UseSpmPreproc = $true
-    SpmSource     = "spm_smoothed"
+    FmriSource    = "spm_smoothed"
 }
 
 if ($Subjects.Count -gt 0) {

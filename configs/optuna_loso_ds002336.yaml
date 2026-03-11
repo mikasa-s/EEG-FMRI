@@ -1,0 +1,148 @@
+study:
+  name: optuna_loso_ds002336
+  default_mode: full
+  direction: maximize
+  n_trials: 2
+  output_dir: outputs/optuna/loso_ds002336
+  command:
+    - powershell
+    - -ExecutionPolicy
+    - Bypass
+    - -File
+    - scripts/ds002336/run_ds002336.ps1
+  static_args: []
+  output_arg: -OutputRoot
+  sampler:
+    name: tpe
+    seed: 42
+    n_startup_trials: 3
+
+runtime_configs:
+  train_base: configs/train_ds002336.yaml
+  finetune_base: configs/finetune_ds002336.yaml
+  train_arg: -TrainConfig
+  finetune_arg: -FinetuneConfig
+
+metric:
+  type: csv
+  path: finetune/loso_finetune_summary.csv
+  column: accuracy
+  row_filter:
+    fold: CROSS_FOLD_MEAN_STD
+
+parameters:
+  train_epochs:
+    suggest: categorical
+    choices: [20, 30]
+    target: config
+    config_updates:
+      - config: train
+        key: train.epochs
+      - config: finetune
+        key: finetune.epochs
+
+  batch_size:
+    suggest: categorical
+    choices: [8, 16, 32]
+    target: config
+    config_updates:
+      - config: train
+        key: train.batch_size
+      - config: train
+        key: train.eval_batch_size
+      - config: finetune
+        key: train.batch_size
+      - config: finetune
+        key: train.eval_batch_size
+
+  lr:
+    suggest: float
+    low: 1e-5
+    high: 1e-3
+    log: true
+    target: config
+    config_updates:
+      - config: train
+        key: train.lr
+      - config: finetune
+        key: finetune.lr
+
+  weight_decay:
+    suggest: float
+    low: 1e-6
+    high: 1e-2
+    log: true
+    target: config
+    config_updates:
+      - config: train
+        key: train.weight_decay
+      - config: finetune
+        key: finetune.weight_decay
+
+  min_lr:
+    suggest: float
+    low: 1e-7
+    high: 1e-4
+    log: true
+    target: config
+    config_updates:
+      - config: train
+        key: train.min_lr
+      - config: finetune
+        key: finetune.min_lr
+
+  hidden_dim:
+    suggest: categorical
+    choices: [128, 256, 512]
+    target: config
+    config_updates:
+      - config: finetune
+        key: finetune.hidden_dim
+
+  grad_clip:
+    suggest: categorical
+    choices: [0.0, 0.5, 1.0, 5.0]
+    target: config
+    config_updates:
+      - config: train
+        key: train.grad_clip
+      - config: finetune
+        key: finetune.grad_clip
+
+  early_stop_patience:
+    suggest: categorical
+    choices: [5, 8, 10]
+    target: config
+    config_updates:
+      - config: finetune
+        key: finetune.early_stop_patience
+
+modes:
+  full:
+    study_name: optuna_loso_ds002336_full
+    output_dir: outputs/optuna/loso_ds002336_full
+    parameter_names: [train_epochs, batch_size, lr, weight_decay, min_lr, hidden_dim, grad_clip, early_stop_patience]
+
+  finetune_only:
+    study_name: optuna_loso_ds002336_finetune_only
+    output_dir: outputs/optuna/loso_ds002336_finetune_only
+    static_args: [-SkipContrastive]
+    metric:
+      path: finetune/loso_finetune_summary.csv
+      column: accuracy
+      row_filter:
+        fold: CROSS_FOLD_MEAN_STD
+    parameter_names: [lr, min_lr]
+    # train_epochs, batch_size, lr, weight_decay, min_lr, hidden_dim, grad_clip, early_stop_patience
+
+  contrastive_only:
+    study_name: optuna_loso_ds002336_contrastive_only
+    output_dir: outputs/optuna/loso_ds002336_contrastive_only
+    static_args: [-SkipFinetune]
+    metric:
+      path: contrastive/loso_contrastive_summary.csv
+      column: mean_r1
+      row_filter:
+        fold: CROSS_FOLD_MEAN_STD
+    parameter_names: [lr]
+    # train_epochs, batch_size, lr, weight_decay, min_lr, grad_clip

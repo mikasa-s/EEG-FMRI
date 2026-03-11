@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """分布式训练相关的轻量工具函数。"""
 
 import os

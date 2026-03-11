@@ -10,7 +10,6 @@ import time
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
-from tqdm import tqdm
 
 from .datasets import PairedEEGfMRIDataset
 from .distributed import cleanup_distributed, configure_cudnn, configure_runtime_devices, gather_tensor, init_distributed, is_dist_initialized, is_main_process, runtime_summary
@@ -43,8 +42,7 @@ class ContrastiveTrainer:
             num_workers=int(train_cfg.get("num_workers", 4)),
             pin_memory=bool(train_cfg.get("pin_memory", True)),
         )
-        # 对比学习阶段只使用训练集，不构建验证集或测试集，避免误用下游评估数据。
-        self.val_loader = None
+        self.val_loader = self.build_optional_eval_loader(data_cfg, train_cfg, split="val")
 
         self.model = self.build_model(cfg)
         if is_main_process():
@@ -222,11 +220,8 @@ class ContrastiveTrainer:
         self.model.train()
         running = 0.0
         start = time.time()
-        iterator = self.train_loader
-        if is_main_process():
-            iterator = tqdm(self.train_loader, desc=f"Epoch {epoch}/{self.epochs}", leave=False)
 
-        for step, batch in enumerate(iterator, start=1):
+        for step, batch in enumerate(self.train_loader, start=1):
             eeg = batch["eeg"].to(self.device, non_blocking=True)
             fmri = batch["fmri"].to(self.device, non_blocking=True)
             self.optimizer.zero_grad(set_to_none=True)
@@ -258,13 +253,11 @@ class ContrastiveTrainer:
             if optimizer_stepped:
                 self.scheduler.step()
             running += float(loss.item())
-            if is_main_process() and step % self.log_interval == 0:
-                lr = self.optimizer.param_groups[0]["lr"]
-                print(f"[epoch {epoch:03d} | step {step:05d}] loss={running / step:.6f} lr={lr:.3e}")
 
         epoch_loss = running / max(1, len(self.train_loader))
         if is_main_process():
-            print(f"Epoch {epoch:03d} done: loss={epoch_loss:.6f}, time={time.time() - start:.1f}s")
+            lr = self.optimizer.param_groups[0]["lr"]
+            print(f"Contrastive epoch {epoch:03d} done: loss={epoch_loss:.6f}, lr={lr:.3e}, time={time.time() - start:.1f}s")
         return epoch_loss
 
     @torch.no_grad()
@@ -299,26 +292,44 @@ class ContrastiveTrainer:
         return metrics
 
     def fit(self) -> None:
-        """执行完整训练流程，仅基于训练 loss 选择最佳模型。"""
-        best = float("inf")
+        """执行完整训练流程；有验证集时按 mean_r1 选最好 checkpoint，否则退化为训练 loss。"""
+        use_val_selection = self.val_loader is not None
+        best = float("-inf") if use_val_selection else float("inf")
         best_epoch = 0
         last_train_loss = float("nan")
+        last_val_metrics = None
+        best_val_metrics = None
         for epoch in range(self.start_epoch, self.epochs + 1):
             train_loss = self.train_one_epoch(epoch)
             last_train_loss = train_loss
             current_score = train_loss
-            if current_score < best:
+            val_metrics = None
+            if self.val_loader is not None and epoch % self.eval_interval == 0:
+                val_metrics = self.evaluate(self.val_loader, split_name="val")
+                last_val_metrics = val_metrics
+                current_score = float(val_metrics["mean_r1"])
+
+            is_better = current_score > best if use_val_selection else current_score < best
+            if is_better:
                 best = current_score
                 best_epoch = epoch
                 extra = {"train_loss": train_loss}
+                if val_metrics is not None:
+                    extra["val_metrics"] = val_metrics
+                    best_val_metrics = val_metrics
                 self.save_checkpoint(epoch, best, "best.pth", extra=extra)
 
         final_metrics = {
             "epochs": self.epochs,
             "best_epoch": best_epoch,
             "best_score": best,
+            "selection_mode": "val_mean_r1" if use_val_selection else "train_loss",
             "last_train_loss": last_train_loss,
         }
+        if last_val_metrics is not None:
+            final_metrics["last_val_metrics"] = last_val_metrics
+        if best_val_metrics is not None:
+            final_metrics["best_val_metrics"] = best_val_metrics
         self.save_metrics("final_metrics.json", final_metrics)
         cleanup_distributed()
 

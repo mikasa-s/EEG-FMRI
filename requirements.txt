@@ -7,6 +7,7 @@ scipy>=1.11.0
 # 配置与日志
 pyyaml>=6.0
 tqdm>=4.66.0
+optuna>=3.6.0
 # EEG / fMRI 数据读取与 ROI 提取
 mne>=1.6.0
 nibabel>=5.2.0

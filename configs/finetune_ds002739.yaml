@@ -58,6 +58,14 @@ finetune:
   num_classes: 2
   selection_metric: accuracy
   fusion: eeg_only
+  eeg_baseline:
+    enabled: false
+    category: foundation
+    model_name: cbramod
+    feature_dim: 256
+    dropout: 0.2
+    traditional_hidden_dim: 128
+    traditional_num_layers: 2
   hidden_dim: 256
   dropout: 0.2
   freeze_encoders: false
@@ -66,6 +74,8 @@ finetune:
   min_lr: 0.00001
   weight_decay: 0.01
   grad_clip: 1.0
+  early_stop_patience: 10
+  early_stop_min_delta: 0.0
   use_amp: true
   amp_dtype: fp16
   log_interval: 200

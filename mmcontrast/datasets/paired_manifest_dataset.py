@@ -42,7 +42,7 @@ class PairedEEGfMRIDataset(Dataset):
         fmri_normalize_nonzero_only: bool = True,
         require_eeg: bool = True,
         require_fmri: bool = True,
-        subject_pack_cache_size: int = 2,
+        subject_pack_cache_size: int = 5,
     ) -> None:
         self.root_dir = Path(root_dir) if root_dir else None
         self.normalize_eeg = normalize_eeg

@@ -11,9 +11,8 @@ param(
     [int]$EegSeqLen = 20,
     [int]$EegPatchLen = 200,
     [bool]$DropEcg = $true,
-    [switch]$UseSpmPreproc,
-    [ValidateSet("spm_unsmoothed", "spm_smoothed")]
-    [string]$SpmSource = "spm_smoothed"
+    [ValidateSet("raw", "spm_unsmoothed", "spm_smoothed")]
+    [string]$FmriSource = "spm_smoothed"
 )
 
 $ErrorActionPreference = "Stop"
@@ -49,9 +48,9 @@ $cliArgs = @(
     "--test-subjects", $TestSubjects.ToString()
 )
 
-if ($UseSpmPreproc) {
+if ($FmriSource -ne "raw") {
     $cliArgs += @(
-        "--fmri-source", $SpmSource,
+        "--fmri-source", $FmriSource,
         "--discard-initial-trs", "0",
         "--protocol-offset-sec", "0.0"
     )
@@ -77,10 +76,10 @@ if ($Subjects.Count -gt 0) {
 
 Write-Host "Preparing ds002336 dataset..."
 Write-Host ("Output root: " + $OutputRoot)
-Write-Host "Packing one NPZ per subject."
+Write-Host "Packing one subject directory of NPY arrays per subject."
 Write-Host ("Tasks: " + ($Tasks -join ", "))
 Write-Host ("Split mode: " + $SplitMode)
-Write-Host ("fMRI source: " + ($(if ($UseSpmPreproc) { $SpmSource } else { "raw" })))
+Write-Host ("fMRI source: " + $FmriSource)
 if ($Subjects.Count -gt 0) {
     Write-Host ("Subjects: " + ($Subjects -join ", "))
 }

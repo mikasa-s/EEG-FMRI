@@ -14,7 +14,8 @@ def run_finetuning(config_path: str) -> None:
     cfg = TrainConfig.load(config_path)
     cfg.validate(base_dir=str(Path(config_path).resolve().parent.parent))
 
-    if get_rank() == 0:
+    dump_resolved_config = bool(cfg.section("finetune").get("dump_resolved_config", False))
+    if get_rank() == 0 and dump_resolved_config:
         # 只在主进程写配置，避免多卡下重复覆盖文件。
         cfg.dump(cfg.section("finetune").get("output_dir", "outputs/finetune"))
 

@@ -6,12 +6,12 @@ from contextlib import nullcontext
 import csv
 import json
 from pathlib import Path
+import time
 from typing import Any
 
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
-from tqdm import tqdm
 
 from .datasets import PairedEEGfMRIDataset
 from .distributed import cleanup_distributed, configure_cudnn, configure_runtime_devices, gather_tensor, init_distributed, is_dist_initialized, is_main_process, runtime_summary
@@ -112,6 +112,8 @@ class FinetuneTrainer:
         )
 
         self.grad_clip = float(finetune_cfg.get("grad_clip", 0.0))
+        self.early_stop_patience = int(finetune_cfg.get("early_stop_patience", 0))
+        self.early_stop_min_delta = float(finetune_cfg.get("early_stop_min_delta", 0.0))
         self.use_amp = bool(finetune_cfg.get("use_amp", True))
         self.amp_dtype = str(finetune_cfg.get("amp_dtype", "fp16"))
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp and self.amp_dtype == "fp16")
@@ -287,11 +289,9 @@ class FinetuneTrainer:
 
         self.model.train()
         running = 0.0
-        iterator = self.train_loader
-        if is_main_process():
-            iterator = tqdm(self.train_loader, desc=f"Finetune {epoch}/{self.epochs}", leave=False)
+        start = time.time()
 
-        for step, batch in enumerate(iterator, start=1):
+        for step, batch in enumerate(self.train_loader, start=1):
             eeg = batch["eeg"].to(self.device, non_blocking=True) if "eeg" in batch else None
             fmri = batch["fmri"].to(self.device, non_blocking=True) if "fmri" in batch else None
             labels = batch["label"].to(self.device, non_blocking=True)
@@ -324,10 +324,12 @@ class FinetuneTrainer:
             if optimizer_stepped:
                 self.scheduler.step()
             running += float(loss.item())
-            if is_main_process() and step % self.log_interval == 0:
-                print(f"[finetune epoch {epoch:03d} | step {step:05d}] loss={running / step:.6f}")
 
-        return running / max(1, len(self.train_loader))
+        epoch_loss = running / max(1, len(self.train_loader))
+        if is_main_process():
+            lr = self.optimizer.param_groups[0]["lr"]
+            print(f"Finetune epoch {epoch:03d} done: train_loss={epoch_loss:.6f}, lr={lr:.3e}, time={time.time() - start:.1f}s")
+        return epoch_loss
 
     @torch.no_grad()
     def evaluate(
@@ -377,7 +379,7 @@ class FinetuneTrainer:
             raise FileNotFoundError(f"Finetune checkpoint not found for test_only: {self.eval_checkpoint_path}")
 
         self.load_checkpoint(self.eval_checkpoint_path)
-        test_metrics = self.evaluate(self.test_loader, split_name="test", save_logits=True)
+        test_metrics = self.evaluate(self.test_loader, split_name="test", save_logits=False)
         payload = {
             "mode": "test_only",
             "checkpoint_path": str(self.eval_checkpoint_path),
@@ -393,11 +395,11 @@ class FinetuneTrainer:
         best_epoch = 0
         last_train_loss = float("nan")
         last_val_metrics = None
+        epochs_without_improvement = 0
+        early_stopped = False
         for epoch in range(1, self.epochs + 1):
             train_loss = self.train_one_epoch(epoch)
             last_train_loss = train_loss
-            if is_main_process():
-                print(f"Finetune epoch {epoch:03d} done: train_loss={train_loss:.6f}")
 
             val_metrics = None
             if self.val_loader is not None and epoch % self.eval_interval == 0:
@@ -405,27 +407,46 @@ class FinetuneTrainer:
                 last_val_metrics = val_metrics
 
             current_score = val_metrics[self.selection_metric] if val_metrics is not None else -train_loss
-            if current_score > best:
+            improved = current_score > (best + self.early_stop_min_delta)
+            if improved:
                 best = current_score
                 best_epoch = epoch
+                epochs_without_improvement = 0
                 extra = {"train_loss": train_loss, "selection_metric": self.selection_metric}
                 if val_metrics is not None:
                     extra["val_metrics"] = val_metrics
                 self.save_checkpoint(epoch, best, "best.pth", extra=extra)
+            else:
+                epochs_without_improvement += 1
+
+            if self.early_stop_patience > 0 and epochs_without_improvement >= self.early_stop_patience:
+                early_stopped = True
+                if is_main_process():
+                    print(
+                        "Early stopping triggered: "
+                        f"patience={self.early_stop_patience}, "
+                        f"min_delta={self.early_stop_min_delta}, "
+                        f"best_epoch={best_epoch}"
+                    )
+                break
 
         final_metrics = {
             "epochs": self.epochs,
+            "completed_epochs": epoch,
             "best_epoch": best_epoch,
             "best_score": best,
             "selection_metric": self.selection_metric,
             "last_train_loss": last_train_loss,
+            "early_stop_patience": self.early_stop_patience,
+            "early_stop_min_delta": self.early_stop_min_delta,
+            "early_stopped": early_stopped,
         }
         if last_val_metrics is not None:
             final_metrics["last_val_metrics"] = last_val_metrics
 
         if self.test_loader is not None:
             self.load_checkpoint(self.best_checkpoint_path)
-            test_metrics = self.evaluate(self.test_loader, split_name="test", save_logits=True)
+            test_metrics = self.evaluate(self.test_loader, split_name="test", save_logits=False)
             if test_metrics is not None:
                 final_metrics["test_metrics"] = test_metrics
                 self.save_metrics("test_metrics.json", test_metrics)

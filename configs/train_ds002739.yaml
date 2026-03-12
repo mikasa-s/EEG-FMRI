@@ -3,13 +3,13 @@ train:
   force_cpu: false
   gpu_count: 1
   gpu_ids: []
-  epochs: 50
-  batch_size: 128
-  eval_batch_size: 128
+  epochs: 20
+  batch_size: 32
+  eval_batch_size: 32
   num_workers: 4
   pin_memory: true
-  lr: 0.0001
-  min_lr: 0.00001
+  lr: 0.0005
+  min_lr: 0.00005
   weight_decay: 0.01
   grad_clip: 1.0
   use_amp: true
@@ -23,6 +23,7 @@ train:
 data:
   train_manifest_csv: cache/ds002739/loso_subjectwise/fold_sub-01/manifest_train.csv
   root_dir: cache/ds002739
+  preload_dataset: false
   expected_eeg_shape: [53, 2, 200]
   expected_fmri_shape: [48, 48, 48, 3]
   normalize_eeg: true

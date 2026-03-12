@@ -10,7 +10,8 @@ param(
     [int]$ValSubjects = 2,
     [int]$TestSubjects = 1,
     [double]$EegWindowSec = 2.0,
-    [double]$FmriWindowSec = 6.0
+    [double]$FmriWindowSec = 6.0,
+    [bool]$TrainingReady = $true
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,6 +33,7 @@ $cliArgs = @(
     "--ds-root", $DsRoot,
     "--output-root", $OutputRoot,
     "--fmri-mode", "volume",
+    "--fmri-voxel-size", "2.0", "2.0", "2.0",
     "--pack-subject-files",
     "--eeg-window-sec", $EegWindowSec.ToString(),
     "--fmri-window-sec", $FmriWindowSec.ToString(),
@@ -59,6 +61,13 @@ if ($Runs.Count -gt 0) {
     $cliArgs += $Runs
 }
 
+if ($TrainingReady) {
+    $cliArgs += "--training-ready"
+}
+else {
+    $cliArgs += "--no-training-ready"
+}
+
 if ($Subjects.Count -gt 0) {
     Write-Host ("Preparing ds002739 for subjects: " + ($Subjects -join ", "))
 }
@@ -73,4 +82,6 @@ if ($Runs.Count -gt 0) {
 Write-Host ("Output root: " + $OutputRoot)
 Write-Host ("Worker processes: " + $NumWorkers)
 Write-Host ("Split mode: " + $SplitMode)
+Write-Host ("Training ready: " + $TrainingReady)
+Write-Host "fMRI preprocessing: resample to 2.0x2.0x2.0 mm, then center-crop to 48x48x48"
 & $python @cliArgs

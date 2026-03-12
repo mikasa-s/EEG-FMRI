@@ -58,8 +58,12 @@ function Write-ContrastiveSummary {
             fold_dir       = $foldDir.Name
             mean_r1        = Get-MetricValue -Metrics $bestValMetrics -Name "mean_r1"
             mean_r1_std    = Get-MetricValue -Metrics $bestValMetrics -Name "mean_r1_std"
+            mean_r5        = Get-MetricValue -Metrics $bestValMetrics -Name "mean_r5"
+            mean_r5_std    = Get-MetricValue -Metrics $bestValMetrics -Name "mean_r5_std"
             eeg_to_fmri_r1 = Get-MetricValue -Metrics $bestValMetrics -Name "eeg_to_fmri_r1"
+            eeg_to_fmri_r5 = Get-MetricValue -Metrics $bestValMetrics -Name "eeg_to_fmri_r5"
             fmri_to_eeg_r1 = Get-MetricValue -Metrics $bestValMetrics -Name "fmri_to_eeg_r1"
+            fmri_to_eeg_r5 = Get-MetricValue -Metrics $bestValMetrics -Name "fmri_to_eeg_r5"
             loss           = Get-MetricValue -Metrics $bestValMetrics -Name "loss"
             best_epoch     = Get-MetricValue -Metrics $metrics -Name "best_epoch"
             selection_mode = [string]$metrics.selection_mode
@@ -71,8 +75,11 @@ function Write-ContrastiveSummary {
     }
 
     $meanR1Values = @($summaryRows | ForEach-Object { [double]$_.mean_r1 })
+    $meanR5Values = @($summaryRows | ForEach-Object { [double]$_.mean_r5 })
     $eegR1Values = @($summaryRows | ForEach-Object { [double]$_.eeg_to_fmri_r1 })
+    $eegR5Values = @($summaryRows | ForEach-Object { [double]$_.eeg_to_fmri_r5 })
     $fmriR1Values = @($summaryRows | ForEach-Object { [double]$_.fmri_to_eeg_r1 })
+    $fmriR5Values = @($summaryRows | ForEach-Object { [double]$_.fmri_to_eeg_r5 })
     $lossValues = @($summaryRows | ForEach-Object { [double]$_.loss })
 
     $summaryRows += [pscustomobject]@{
@@ -80,8 +87,12 @@ function Write-ContrastiveSummary {
         fold_dir       = ""
         mean_r1        = Get-MeanValue -Values $meanR1Values
         mean_r1_std    = Get-StdValue -Values $meanR1Values
+        mean_r5        = Get-MeanValue -Values $meanR5Values
+        mean_r5_std    = Get-StdValue -Values $meanR5Values
         eeg_to_fmri_r1 = Get-MeanValue -Values $eegR1Values
+        eeg_to_fmri_r5 = Get-MeanValue -Values $eegR5Values
         fmri_to_eeg_r1 = Get-MeanValue -Values $fmriR1Values
+        fmri_to_eeg_r5 = Get-MeanValue -Values $fmriR5Values
         loss           = Get-MeanValue -Values $lossValues
         best_epoch     = 0
         selection_mode = "val_mean_r1"
@@ -94,6 +105,7 @@ function Write-ContrastiveSummary {
     $aggregate = $summaryRows | Where-Object { $_.fold -eq "CROSS_FOLD_MEAN_STD" } | Select-Object -First 1
     Write-Host "---"
     Write-Host ([string]::Format("Cross-fold contrastive mean_r1: {0:F4} ({1:F4})", $aggregate.mean_r1, $aggregate.mean_r1_std))
+    Write-Host ([string]::Format("Cross-fold contrastive mean_r5: {0:F4} ({1:F4})", $aggregate.mean_r5, $aggregate.mean_r5_std))
     Write-Host ("Saved summary to " + $summaryPath)
 }
 
@@ -235,6 +247,7 @@ if ($TestOnly) {
 foreach ($foldDir in $foldDirs) {
     $foldName = $foldDir.Name
     $displayFoldName = $foldNameMap[$foldName]
+    $foldStart = Get-Date
     $trainManifest = Join-Path $foldDir.FullName "manifest_train.csv"
     $valManifest = Join-Path $foldDir.FullName "manifest_val.csv"
     $testManifest = Join-Path $foldDir.FullName "manifest_test.csv"
@@ -281,6 +294,8 @@ foreach ($foldDir in $foldDirs) {
 
         Write-Host ("[" + $displayFoldName + "] test-only using finetune checkpoint: " + $finetuneCheckpoint)
         Invoke-PythonOrThrow -PythonExe $python -Args $finetuneArgs -StepName ("[" + $displayFoldName + "] test-only")
+        $foldElapsed = (Get-Date) - $foldStart
+        Write-Host ([string]::Format("[{0}] fold_time={1:N1}s", $displayFoldName, $foldElapsed.TotalSeconds))
         continue
     }
 
@@ -369,6 +384,9 @@ foreach ($foldDir in $foldDirs) {
         Write-Host ("[" + $displayFoldName + "] finetune")
         Invoke-PythonOrThrow -PythonExe $python -Args $finetuneArgs -StepName ("[" + $displayFoldName + "] finetune")
     }
+
+    $foldElapsed = (Get-Date) - $foldStart
+    Write-Host ([string]::Format("[{0}] fold_time={1:N1}s", $displayFoldName, $foldElapsed.TotalSeconds))
 }
 
 if (-not $SkipContrastive) {

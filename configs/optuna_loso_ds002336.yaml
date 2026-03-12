@@ -43,7 +43,7 @@ parameters:
 
   batch_size:
     suggest: categorical
-    choices: [8, 16, 32]
+    choices: [8, 16]
     target: config
     config_updates:
       - config: train

@@ -6,7 +6,6 @@ from contextlib import nullcontext
 import csv
 import json
 from pathlib import Path
-import time
 from typing import Any
 
 import torch
@@ -156,15 +155,16 @@ class FinetuneTrainer:
 
     def build_loader(self, dataset, batch_size: int, sampler=None, shuffle=False, drop_last=False, num_workers=4, pin_memory=True):
         """统一封装 DataLoader 创建逻辑。"""
+        effective_num_workers = 0 if getattr(dataset, "is_preloaded", False) else num_workers
         return DataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=shuffle,
             sampler=sampler,
-            num_workers=num_workers,
+            num_workers=effective_num_workers,
             pin_memory=pin_memory,
             drop_last=drop_last,
-            persistent_workers=num_workers > 0,
+            persistent_workers=effective_num_workers > 0,
         )
 
     def build_optional_eval_loader(self, data_cfg: dict[str, Any], train_cfg: dict[str, Any], split: str):
@@ -289,7 +289,6 @@ class FinetuneTrainer:
 
         self.model.train()
         running = 0.0
-        start = time.time()
 
         for step, batch in enumerate(self.train_loader, start=1):
             eeg = batch["eeg"].to(self.device, non_blocking=True) if "eeg" in batch else None
@@ -326,9 +325,6 @@ class FinetuneTrainer:
             running += float(loss.item())
 
         epoch_loss = running / max(1, len(self.train_loader))
-        if is_main_process():
-            lr = self.optimizer.param_groups[0]["lr"]
-            print(f"Finetune epoch {epoch:03d} done: train_loss={epoch_loss:.6f}, lr={lr:.3e}, time={time.time() - start:.1f}s")
         return epoch_loss
 
     @torch.no_grad()
@@ -366,9 +362,6 @@ class FinetuneTrainer:
         if save_logits:
             self.save_logits_artifacts(split_name=split_name, logits=logits, labels=labels)
 
-        if is_main_process():
-            summary = ", ".join([f"{key}={value:.4f}" for key, value in metrics.items()])
-            print(f"[{split_name}] {summary}")
         return metrics
 
     def test_only(self) -> None:
@@ -405,6 +398,22 @@ class FinetuneTrainer:
             if self.val_loader is not None and epoch % self.eval_interval == 0:
                 val_metrics = self.evaluate(self.val_loader, split_name="val")
                 last_val_metrics = val_metrics
+
+            if is_main_process():
+                summary_parts = [
+                    f"epoch={epoch:03d}/{self.epochs:03d}",
+                    f"train_loss={train_loss:.6f}",
+                    f"lr={self.optimizer.param_groups[0]['lr']:.3e}",
+                ]
+                if val_metrics is not None:
+                    summary_parts.extend(
+                        [
+                            f"val_loss={float(val_metrics['loss']):.6f}",
+                            f"val_accuracy={float(val_metrics['accuracy']):.4f}",
+                            f"val_macro_f1={float(val_metrics['macro_f1']):.4f}",
+                        ]
+                    )
+                print("Finetune " + ", ".join(summary_parts), flush=True)
 
             current_score = val_metrics[self.selection_metric] if val_metrics is not None else -train_loss
             improved = current_score > (best + self.early_stop_min_delta)

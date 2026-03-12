@@ -2,6 +2,8 @@ from __future__ import annotations
 
 """EEG 与 fMRI 双塔对比学习模型。"""
 
+import time
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -43,10 +45,46 @@ class EEGfMRIContrastiveModel(nn.Module):
         """把 fMRI 特征映射到对比学习嵌入空间。"""
         return F.normalize(self.fmri_proj(fmri_feat), dim=-1)
 
+    @staticmethod
+    def _is_cuda_tensor(tensor: torch.Tensor) -> bool:
+        return tensor.is_cuda and torch.cuda.is_available()
+
     def forward(self, eeg: torch.Tensor, fmri: torch.Tensor) -> dict[str, torch.Tensor]:
         """同时返回原始特征和归一化后的对比嵌入。"""
-        eeg_feat = self.encode_eeg_feature(eeg)
-        fmri_feat = self.encode_fmri_feature(fmri)
+        timing: dict[str, object]
+        if self._is_cuda_tensor(eeg) or self._is_cuda_tensor(fmri):
+            eeg_start = torch.cuda.Event(enable_timing=True)
+            eeg_end = torch.cuda.Event(enable_timing=True)
+            fmri_start = torch.cuda.Event(enable_timing=True)
+            fmri_end = torch.cuda.Event(enable_timing=True)
+
+            eeg_start.record()
+            eeg_feat = self.encode_eeg_feature(eeg)
+            eeg_end.record()
+
+            fmri_start.record()
+            fmri_feat = self.encode_fmri_feature(fmri)
+            fmri_end.record()
+
+            timing = {
+                "mode": "cuda_events",
+                "eeg_events": (eeg_start, eeg_end),
+                "fmri_events": (fmri_start, fmri_end),
+            }
+        else:
+            eeg_start = time.perf_counter()
+            eeg_feat = self.encode_eeg_feature(eeg)
+            eeg_elapsed = time.perf_counter() - eeg_start
+
+            fmri_start = time.perf_counter()
+            fmri_feat = self.encode_fmri_feature(fmri)
+            fmri_elapsed = time.perf_counter() - fmri_start
+
+            timing = {
+                "mode": "cpu_perf_counter",
+                "eeg_seconds": float(eeg_elapsed),
+                "fmri_seconds": float(fmri_elapsed),
+            }
 
         eeg_embed = self.project_eeg(eeg_feat)
         fmri_embed = self.project_fmri(fmri_feat)
@@ -55,4 +93,5 @@ class EEGfMRIContrastiveModel(nn.Module):
             "fmri_feat": fmri_feat,
             "eeg_embed": eeg_embed,
             "fmri_embed": fmri_embed,
+            "timing": timing,
         }

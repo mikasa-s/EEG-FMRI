@@ -12,6 +12,7 @@ data:
   val_manifest_csv: cache/ds002336/loso_subjectwise/fold_sub-xp101/manifest_val.csv
   test_manifest_csv: cache/ds002336/loso_subjectwise/fold_sub-xp101/manifest_test.csv
   root_dir: cache/ds002336
+  preload_dataset: true
   expected_eeg_shape: [63, 20, 200]
   expected_fmri_shape: [48, 48, 48, 10]
   normalize_eeg: true

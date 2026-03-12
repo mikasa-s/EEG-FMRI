@@ -5,7 +5,6 @@ from __future__ import annotations
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
-import time
 
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -127,15 +126,16 @@ class ContrastiveTrainer:
 
     def build_loader(self, dataset, batch_size: int, sampler=None, shuffle=False, drop_last=False, num_workers=4, pin_memory=True):
         """统一封装 DataLoader 创建逻辑，避免训练和评估重复写参数。"""
+        effective_num_workers = 0 if getattr(dataset, "is_preloaded", False) else num_workers
         return DataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=shuffle,
             sampler=sampler,
-            num_workers=num_workers,
+            num_workers=effective_num_workers,
             pin_memory=pin_memory,
             drop_last=drop_last,
-            persistent_workers=num_workers > 0,
+            persistent_workers=effective_num_workers > 0,
         )
 
     def build_optional_eval_loader(self, data_cfg: dict[str, Any], train_cfg: dict[str, Any], split: str):
@@ -212,14 +212,17 @@ class ContrastiveTrainer:
         with open(self.output_dir / name, "w", encoding="utf-8") as handle:
             json.dump(metrics, handle, ensure_ascii=False, indent=2)
 
-    def train_one_epoch(self, epoch: int) -> float:
+    def train_one_epoch(self, epoch: int) -> tuple[float, float, float]:
         """执行一个 epoch 的对比学习训练。"""
         if self.sampler is not None:
             self.sampler.set_epoch(epoch)
 
         self.model.train()
         running = 0.0
-        start = time.time()
+        eeg_seconds = 0.0
+        fmri_seconds = 0.0
+        eeg_event_pairs: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
+        fmri_event_pairs: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
 
         for step, batch in enumerate(self.train_loader, start=1):
             eeg = batch["eeg"].to(self.device, non_blocking=True)
@@ -233,6 +236,15 @@ class ContrastiveTrainer:
             with autocast_ctx:
                 out = self.model(eeg=eeg, fmri=fmri)
                 loss = self.criterion(out["eeg_embed"], out["fmri_embed"])
+
+            timing = out.get("timing", {})
+            timing_mode = timing.get("mode")
+            if timing_mode == "cuda_events":
+                eeg_event_pairs.append(timing["eeg_events"])
+                fmri_event_pairs.append(timing["fmri_events"])
+            elif timing_mode == "cpu_perf_counter":
+                eeg_seconds += float(timing.get("eeg_seconds", 0.0))
+                fmri_seconds += float(timing.get("fmri_seconds", 0.0))
 
             if self.scaler.is_enabled():
                 self.scaler.scale(loss).backward()
@@ -254,11 +266,13 @@ class ContrastiveTrainer:
                 self.scheduler.step()
             running += float(loss.item())
 
+        if eeg_event_pairs or fmri_event_pairs:
+            torch.cuda.synchronize(self.device)
+            eeg_seconds += sum(start.elapsed_time(end) for start, end in eeg_event_pairs) / 1000.0
+            fmri_seconds += sum(start.elapsed_time(end) for start, end in fmri_event_pairs) / 1000.0
+
         epoch_loss = running / max(1, len(self.train_loader))
-        if is_main_process():
-            lr = self.optimizer.param_groups[0]["lr"]
-            print(f"Contrastive epoch {epoch:03d} done: loss={epoch_loss:.6f}, lr={lr:.3e}, time={time.time() - start:.1f}s")
-        return epoch_loss
+        return epoch_loss, eeg_seconds, fmri_seconds
 
     @torch.no_grad()
     def evaluate(self, loader: DataLoader | None, split_name: str) -> dict[str, float] | None:
@@ -286,9 +300,6 @@ class ContrastiveTrainer:
         metrics = contrastive_retrieval_metrics(eeg_embed, fmri_embed)
         metrics["loss"] = total_loss / max(1, len(loader))
 
-        if is_main_process():
-            summary = ", ".join([f"{key}={value:.4f}" for key, value in metrics.items()])
-            print(f"[{split_name}] {summary}")
         return metrics
 
     def fit(self) -> None:
@@ -300,7 +311,7 @@ class ContrastiveTrainer:
         last_val_metrics = None
         best_val_metrics = None
         for epoch in range(self.start_epoch, self.epochs + 1):
-            train_loss = self.train_one_epoch(epoch)
+            train_loss, eeg_model_seconds, fmri_model_seconds = self.train_one_epoch(epoch)
             last_train_loss = train_loss
             current_score = train_loss
             val_metrics = None
@@ -308,6 +319,28 @@ class ContrastiveTrainer:
                 val_metrics = self.evaluate(self.val_loader, split_name="val")
                 last_val_metrics = val_metrics
                 current_score = float(val_metrics["mean_r1"])
+
+            if is_main_process():
+                summary_parts = [
+                    f"epoch={epoch:03d}/{self.epochs:03d}",
+                    f"train_loss={train_loss:.6f}",
+                    f"lr={self.optimizer.param_groups[0]['lr']:.3e}",
+                    f"eeg_model_time={eeg_model_seconds:.1f}s",
+                    f"fmri_model_time={fmri_model_seconds:.1f}s",
+                ]
+                if val_metrics is not None:
+                    summary_parts.extend(
+                        [
+                            f"val_loss={float(val_metrics['loss']):.6f}",
+                            f"val_mean_r1={float(val_metrics['mean_r1']):.4f}",
+                            f"val_mean_r5={float(val_metrics['mean_r5']):.4f}",
+                            f"val_eeg_to_fmri_r1={float(val_metrics['eeg_to_fmri_r1']):.4f}",
+                            f"val_eeg_to_fmri_r5={float(val_metrics['eeg_to_fmri_r5']):.4f}",
+                            f"val_fmri_to_eeg_r1={float(val_metrics['fmri_to_eeg_r1']):.4f}",
+                            f"val_fmri_to_eeg_r5={float(val_metrics['fmri_to_eeg_r5']):.4f}",
+                        ]
+                    )
+                print("Contrastive " + ", ".join(summary_parts), flush=True)
 
             is_better = current_score > best if use_val_selection else current_score < best
             if is_better:

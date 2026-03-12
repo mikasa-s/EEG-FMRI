@@ -4,7 +4,7 @@ train:
   gpu_ids: []
   batch_size: 128
   eval_batch_size: 128
-  num_workers: 3
+  num_workers: 4
   pin_memory: true
 
 data:
@@ -12,6 +12,7 @@ data:
   val_manifest_csv: cache/ds002739/loso_subjectwise/fold_sub-01/manifest_val.csv
   test_manifest_csv: cache/ds002739/loso_subjectwise/fold_sub-01/manifest_test.csv
   root_dir: cache/ds002739
+  preload_dataset: false
   expected_eeg_shape: [53, 2, 200]
   expected_fmri_shape: [48, 48, 48, 3]
   normalize_eeg: true

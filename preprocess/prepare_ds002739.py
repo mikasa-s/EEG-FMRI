@@ -20,11 +20,14 @@ from preprocess_common import (
     add_eeg_patch_args,
     add_subject_args,
     add_subject_packing_and_split_args,
+    add_training_ready_arg,
     extract_roi_timeseries,
     find_subjects,
     get_atlas_labels_img,
     load_bold_volume,
     preprocess_fmri_volume,
+    prepare_training_ready_eeg,
+    prepare_training_ready_fmri,
     stack_subject_samples,
     write_subject_memmap_pack,
     write_loso_splits,
@@ -55,6 +58,7 @@ class SampleRecord:
     fmri_shape: str
     window_sec: float
     trial_index: int
+    training_ready: bool = False
 
 
 @dataclass(frozen=True)
@@ -65,6 +69,7 @@ class SubjectRecord:
     eeg_shape: str
     fmri_shape: str
     label_shape: str
+    training_ready: bool = False
 
 
 @dataclass(frozen=True)
@@ -73,6 +78,7 @@ class RunSummary:
     run: str
     bold_shape: str
     voxel_size: str
+    target_voxel_size: str
     exported_fmri_shape: str
     eeg_shape: str
     eeg_fmri_offset_sec: float
@@ -163,6 +169,7 @@ def parse_args() -> argparse.Namespace:
         val_subjects=2,
         test_subjects=1,
     )
+    add_training_ready_arg(parser)
     parser.add_argument("--num-workers", type=int, default=1, help="Number of subject-level worker processes. Use 1 to keep processing serial.")
     return parser.parse_args()
 
@@ -441,6 +448,7 @@ def build_sample_record(
     fmri: np.ndarray,
     window_sec: float,
     trial_index: int,
+    training_ready: bool,
 ) -> SampleRecord:
     return SampleRecord(
         sample_id=sample_id,
@@ -456,6 +464,7 @@ def build_sample_record(
         fmri_shape="x".join(str(dim) for dim in fmri.shape),
         window_sec=float(window_sec),
         trial_index=int(trial_index),
+        training_ready=bool(training_ready),
     )
 
 
@@ -541,6 +550,7 @@ def prepare_subject(
                 run=run,
                 bold_shape="x".join(str(dim) for dim in bold_shape),
                 voxel_size="x".join(str(dim) for dim in voxel_size),
+                target_voxel_size="x".join(str(float(dim)) for dim in args.fmri_voxel_size),
                 exported_fmri_shape="x".join(str(dim) for dim in fmri_source.shape),
                 eeg_shape="x".join(str(dim) for dim in eeg_data.shape),
                 eeg_fmri_offset_sec=eeg_fmri_offset_sec,
@@ -587,6 +597,7 @@ def prepare_subject(
                 )
                 if args.eeg_mode == "patched":
                     eeg_window = maybe_patch_eeg(eeg_window, seq_len=eeg_seq_len, patch_len=eeg_patch_len)
+                eeg_window = prepare_training_ready_eeg(eeg_window, enabled=bool(args.training_ready))
 
                 if args.fmri_mode == "roi":
                     fmri_window = slice_fmri_window(
@@ -602,6 +613,7 @@ def prepare_subject(
                         start_sec=fmri_onset_sec,
                         duration_sec=fmri_window_length_sec,
                     )
+                fmri_window = prepare_training_ready_fmri(fmri_window, fmri_mode=args.fmri_mode, enabled=bool(args.training_ready))
             except ValueError:
                 continue
 
@@ -634,6 +646,7 @@ def prepare_subject(
                         fmri=fmri_window,
                         window_sec=eeg_window_length_sec,
                         trial_index=int(trial_row["trial_index"]),
+                        training_ready=bool(args.training_ready),
                     )
                 )
 
@@ -664,6 +677,7 @@ def prepare_subject(
             eeg_shape="x".join(str(dim) for dim in packed_eeg.shape),
             fmri_shape="x".join(str(dim) for dim in packed_fmri.shape),
             label_shape="x".join(str(dim) for dim in packed_labels_array.shape),
+            training_ready=bool(args.training_ready),
         )
 
     return SubjectPreparationResult(

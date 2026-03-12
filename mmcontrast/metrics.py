@@ -26,6 +26,7 @@ def contrastive_retrieval_metrics(eeg_embed: torch.Tensor, fmri_embed: torch.Ten
     eeg_hits_r5 = (eeg_to_fmri_rank[:, : min(5, similarity.size(1))] == targets.unsqueeze(1)).any(dim=1).float()
     fmri_hits_r5 = (fmri_to_eeg_rank[:, : min(5, similarity.size(0))] == targets.unsqueeze(1)).any(dim=1).float()
     mean_r1_per_sample = 0.5 * (eeg_hits_r1 + fmri_hits_r1)
+    mean_r5_per_sample = 0.5 * (eeg_hits_r5 + fmri_hits_r5)
 
     eeg_r1 = float(eeg_hits_r1.mean().item())
     fmri_r1 = float(fmri_hits_r1.mean().item())
@@ -43,6 +44,8 @@ def contrastive_retrieval_metrics(eeg_embed: torch.Tensor, fmri_embed: torch.Ten
         "fmri_to_eeg_r5_std": _safe_std(fmri_hits_r5),
         "mean_r1": 0.5 * (eeg_r1 + fmri_r1),
         "mean_r1_std": _safe_std(mean_r1_per_sample),
+        "mean_r5": 0.5 * (eeg_r5 + fmri_r5),
+        "mean_r5_std": _safe_std(mean_r5_per_sample),
     }
 
 

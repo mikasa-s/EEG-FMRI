@@ -162,6 +162,13 @@ prepare_ds002336.ps1 的常用参数：
 - -Tasks：只处理指定任务
 - -SplitMode：none、subject、loso，默认 loso
 - -FmriSource：raw、spm_unsmoothed、spm_smoothed，默认 spm_smoothed
+- -TrainingReady：是否在 preprocess 阶段直接做训练所需规范化，并在 manifest 中标记为训练就绪；默认开启，后续 dataset 初始化会跳过规范化和 fMRI 形状适配
+
+如果你想直接导出训练就绪版缓存：
+
+```powershell
+.\scripts\ds002336\prepare_ds002336.ps1
+```
 
 ### ds002739
 
@@ -182,6 +189,20 @@ prepare_ds002739.ps1 的常用参数：
 - -Runs：只处理指定 run
 - -NumWorkers：预处理 worker 数
 - -SplitMode：none、subject、loso，默认 loso
+- fMRI volume 预处理默认先重采样到 2x2x2 mm，再中心裁剪到 48x48x48
+- -TrainingReady：是否在 preprocess 阶段直接做训练所需规范化，并在 manifest 中标记为训练就绪；默认开启，后续 dataset 初始化会跳过规范化和 fMRI 形状适配
+
+如果你想直接导出训练就绪版缓存：
+
+```powershell
+.\scripts\ds002739\prepare_ds002739.ps1
+```
+
+### training-ready 的含义
+
+- 现在默认就是训练就绪模式：preprocess 会直接产出训练就绪数据，并把 `training_ready=true` 写进 manifest；dataset 初始化时会跳过 EEG/fMRI 规范化以及 fMRI 的 target_shape、pad/crop 处理。
+- 如果你想退回旧行为，可以显式关闭：PowerShell 脚本里传 `-TrainingReady:$false`，或直接调用 Python 预处理入口时传 `--no-training-ready`。
+- 这个开关只负责把训练前的数据准备职责前移到 preprocess，不会改变 LOSO 切分逻辑，也不会改变模型配置本身。
 
 ### 顺序处理两个数据集
 

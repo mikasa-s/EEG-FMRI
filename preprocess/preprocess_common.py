@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 import shutil
 from typing import Sequence
 
@@ -13,6 +14,8 @@ from nilearn.datasets import fetch_atlas_schaefer_2018
 from nilearn.maskers import NiftiLabelsMasker
 from scipy.ndimage import zoom
 from scipy.signal import resample
+
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 
 def add_dataset_io_args(parser: argparse.ArgumentParser, ds_root_help: str, output_root_help: str) -> None:
@@ -161,6 +164,22 @@ def add_subject_packing_and_split_args(
     parser.add_argument("--test-subjects", type=int, default=test_subjects, help="Number of subjects in test split when --split-mode=subject.")
 
 
+def add_training_ready_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--training-ready",
+        dest="training_ready",
+        action="store_true",
+        help="Apply training-time normalization during preprocessing and mark manifests so dataset skips normalization and fMRI shape adaptation.",
+    )
+    parser.add_argument(
+        "--no-training-ready",
+        dest="training_ready",
+        action="store_false",
+        help="Disable training-ready preprocessing and keep normalization/fMRI shape adaptation in dataset initialization.",
+    )
+    parser.set_defaults(training_ready=True)
+
+
 def find_subjects(ds_root: Path, requested_subjects: list[str] | None) -> list[str]:
     if requested_subjects:
         return requested_subjects
@@ -296,6 +315,42 @@ def preprocess_fmri_volume(
     if use_float16:
         return output.astype(np.float16)
     return output.astype(np.float32)
+
+
+def zscore_array_sample(data: np.ndarray) -> np.ndarray:
+    output = np.asarray(data, dtype=np.float32)
+    mean = float(output.mean())
+    std = float(output.std()) + 1e-6
+    return ((output - mean) / std).astype(np.float32)
+
+
+def zscore_nonzero_volume_sample(data: np.ndarray) -> np.ndarray:
+    output = np.asarray(data, dtype=np.float32)
+    mask = np.abs(output) > 1e-8
+    if not np.any(mask):
+        return output.astype(np.float32)
+    mean = float(output[mask].mean())
+    std = float(output[mask].std()) + 1e-6
+    normalized = np.array(output, copy=True)
+    normalized[mask] = (normalized[mask] - mean) / std
+    normalized[~mask] = 0.0
+    return normalized.astype(np.float32)
+
+
+def prepare_training_ready_eeg(data: np.ndarray, enabled: bool) -> np.ndarray:
+    output = np.asarray(data, dtype=np.float32)
+    if not enabled:
+        return output.astype(np.float32, copy=False)
+    return zscore_array_sample(output)
+
+
+def prepare_training_ready_fmri(data: np.ndarray, fmri_mode: str, enabled: bool) -> np.ndarray:
+    output = np.asarray(data, dtype=np.float32)
+    if not enabled:
+        return output.astype(np.float32, copy=False)
+    if str(fmri_mode).strip().lower() == "volume":
+        return zscore_nonzero_volume_sample(output)
+    return zscore_array_sample(output)
 
 
 def stack_subject_samples(samples: list[np.ndarray], name: str) -> np.ndarray:

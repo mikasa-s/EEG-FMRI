@@ -11,6 +11,7 @@ param(
     [int]$EegSeqLen = 20,
     [int]$EegPatchLen = 200,
     [bool]$DropEcg = $true,
+    [bool]$TrainingReady = $true,
     [ValidateSet("raw", "spm_unsmoothed", "spm_smoothed")]
     [string]$FmriSource = "spm_smoothed"
 )
@@ -69,6 +70,13 @@ if ($DropEcg) {
     $cliArgs += "--drop-ecg"
 }
 
+if ($TrainingReady) {
+    $cliArgs += "--training-ready"
+}
+else {
+    $cliArgs += "--no-training-ready"
+}
+
 if ($Subjects.Count -gt 0) {
     $cliArgs += "--subjects"
     $cliArgs += $Subjects
@@ -80,6 +88,7 @@ Write-Host "Packing one subject directory of NPY arrays per subject."
 Write-Host ("Tasks: " + ($Tasks -join ", "))
 Write-Host ("Split mode: " + $SplitMode)
 Write-Host ("fMRI source: " + $FmriSource)
+Write-Host ("Training ready: " + $TrainingReady)
 if ($Subjects.Count -gt 0) {
     Write-Host ("Subjects: " + ($Subjects -join ", "))
 }

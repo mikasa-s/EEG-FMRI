@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import csv
 import copy
+import hashlib
 import json
 import math
 import os
@@ -129,6 +130,9 @@ def normalize_study_config(raw: dict[str, Any], args: argparse.Namespace, config
         },
         "parameters": parameters_cfg,
         "runtime_configs": {},
+        "study_name_overridden": bool(args.study_name.strip()),
+        "output_dir_overridden": bool(args.output_dir.strip()),
+        "storage_explicit": bool(storage_value),
     }
 
     runtime_cfg = dict(raw.get("runtime_configs", {}))
@@ -189,6 +193,94 @@ def sample_parameter(trial: Any, name: str, spec: dict[str, Any]) -> Any:
             raise ValueError(f"Parameter '{name}' requires a non-empty choices list")
         return trial.suggest_categorical(name, choices)
     raise ValueError(f"Unsupported parameter suggest type for '{name}': {suggest}")
+
+
+def build_parameter_distribution(spec: dict[str, Any], optuna_module: Any) -> Any:
+    suggest = str(spec.get("suggest", spec.get("type", ""))).strip().lower()
+    distributions = optuna_module.distributions
+    if suggest in {"float", "suggest_float"}:
+        return distributions.FloatDistribution(
+            low=float(spec["low"]),
+            high=float(spec["high"]),
+            log=bool(spec.get("log", False)),
+            step=spec.get("step"),
+        )
+    if suggest in {"int", "suggest_int"}:
+        return distributions.IntDistribution(
+            low=int(spec["low"]),
+            high=int(spec["high"]),
+            log=bool(spec.get("log", False)),
+            step=int(spec.get("step", 1)),
+        )
+    if suggest in {"categorical", "choice", "choices", "suggest_categorical"}:
+        choices = spec.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise ValueError("Categorical parameter requires a non-empty choices list")
+        return distributions.CategoricalDistribution(choices=tuple(choices))
+    raise ValueError(f"Unsupported parameter suggest type: {suggest}")
+
+
+def build_search_space_signature(study_cfg: dict[str, Any]) -> str:
+    signature_payload = {
+        "mode": study_cfg.get("mode", ""),
+        "direction": study_cfg.get("direction", "maximize"),
+        "metric": study_cfg.get("metric", {}),
+        "parameters": study_cfg.get("parameters", {}),
+        "static_args": study_cfg.get("static_args", []),
+        "command": study_cfg.get("command", []),
+    }
+    canonical = json.dumps(signature_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(canonical.encode("utf-8")).hexdigest()
+
+
+def find_distribution_mismatches(study: Any, study_cfg: dict[str, Any], optuna_module: Any) -> list[str]:
+    expected = {
+        name: build_parameter_distribution(spec, optuna_module)
+        for name, spec in study_cfg["parameters"].items()
+        if isinstance(spec, dict)
+    }
+    mismatches: list[str] = []
+    check_compatibility = optuna_module.distributions.check_distribution_compatibility
+
+    for trial in study.trials:
+        for name, distribution in trial.distributions.items():
+            if name not in expected:
+                continue
+            try:
+                check_compatibility(distribution, expected[name])
+            except ValueError as exc:
+                mismatches.append(
+                    f"param '{name}' existing={distribution} current={expected[name]} ({exc})"
+                )
+                break
+        if mismatches:
+            break
+    return mismatches
+
+
+def can_auto_isolate_study(study_cfg: dict[str, Any]) -> bool:
+    return not study_cfg.get("study_name_overridden", False) and not study_cfg.get("output_dir_overridden", False) and not study_cfg.get("storage_explicit", False)
+
+
+def isolate_study_config(study_cfg: dict[str, Any]) -> dict[str, Any]:
+    isolated = dict(study_cfg)
+    suffix = build_search_space_signature(study_cfg)[:8]
+    isolated["study_name"] = f"{study_cfg['study_name']}__{suffix}"
+    output_dir = Path(study_cfg["output_dir"])
+    isolated["output_dir"] = output_dir.with_name(f"{output_dir.name}__{suffix}")
+    isolated["storage_path"] = isolated["output_dir"] / "study.db"
+    isolated["storage"] = f"sqlite:///{isolated['storage_path'].as_posix()}"
+    return isolated
+
+
+def create_or_load_study(study_cfg: dict[str, Any], sampler: Any, optuna_module: Any) -> Any:
+    return optuna_module.create_study(
+        study_name=study_cfg["study_name"],
+        storage=study_cfg["storage"],
+        direction=study_cfg["direction"],
+        sampler=sampler,
+        load_if_exists=True,
+    )
 
 
 def append_parameter_args(command: list[str], param_name: str, param_value: Any, spec: dict[str, Any]) -> None:
@@ -547,16 +639,35 @@ def main() -> None:
     raw_cfg = load_yaml(Path(args.study_config))
     study_cfg = normalize_study_config(raw_cfg, args, Path(args.study_config))
     study_cfg["output_dir"].mkdir(parents=True, exist_ok=True)
+    study_cfg["search_space_signature"] = build_search_space_signature(study_cfg)
 
     optuna = import_optuna()
     sampler = build_sampler(study_cfg, optuna)
-    study = optuna.create_study(
-        study_name=study_cfg["study_name"],
-        storage=study_cfg["storage"],
-        direction=study_cfg["direction"],
-        sampler=sampler,
-        load_if_exists=True,
-    )
+    study = create_or_load_study(study_cfg, sampler, optuna)
+    mismatches = find_distribution_mismatches(study, study_cfg, optuna)
+    if mismatches:
+        if can_auto_isolate_study(study_cfg):
+            previous_name = study_cfg["study_name"]
+            previous_output = study_cfg["output_dir"]
+            study_cfg = isolate_study_config(study_cfg)
+            study_cfg["output_dir"].mkdir(parents=True, exist_ok=True)
+            sampler = build_sampler(study_cfg, optuna)
+            study = create_or_load_study(study_cfg, sampler, optuna)
+            print(
+                "Detected incompatible existing Optuna search space; "
+                f"isolating new study '{study_cfg['study_name']}' under '{study_cfg['output_dir']}'. "
+                f"Previous study '{previous_name}' remains at '{previous_output}'."
+            )
+        else:
+            details = "; ".join(mismatches)
+            raise RuntimeError(
+                "Existing Optuna study is incompatible with the current parameter space. "
+                f"Details: {details}. Use a new --study-name/--output-dir or remove the old study database."
+            )
+
+    study.set_user_attr("search_space_signature", study_cfg["search_space_signature"])
+    study.set_user_attr("mode", study_cfg.get("mode", ""))
+    study.set_user_attr("config_path", str(study_cfg["config_path"]))
 
     if args.summary_only:
         write_study_summaries(study, study_cfg)

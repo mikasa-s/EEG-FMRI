@@ -20,11 +20,14 @@ from preprocess_common import (
     add_fmri_roi_resample_args,
     add_subject_args,
     add_subject_packing_and_split_args,
+    add_training_ready_arg,
     extract_roi_timeseries,
     find_subjects,
     get_atlas_labels_img,
     load_bold_volume,
     preprocess_fmri_volume,
+    prepare_training_ready_eeg,
+    prepare_training_ready_fmri,
     resample_fmri_if_needed,
     stack_subject_samples,
     write_subject_memmap_pack,
@@ -76,6 +79,7 @@ class SampleRecord:
     label_name: str
     eeg_shape: str
     fmri_shape: str
+    training_ready: bool = False
 
 
 @dataclass(frozen=True)
@@ -86,6 +90,7 @@ class SubjectRecord:
     eeg_shape: str
     fmri_shape: str
     label_shape: str
+    training_ready: bool = False
 
 
 @dataclass(frozen=True)
@@ -194,6 +199,7 @@ def parse_args() -> argparse.Namespace:
         val_subjects=2,
         test_subjects=1,
     )
+    add_training_ready_arg(parser)
     return parser.parse_args()
 
 
@@ -434,6 +440,7 @@ def build_sample_record(
     label_name: str,
     eeg: np.ndarray,
     fmri: np.ndarray,
+    training_ready: bool,
 ) -> SampleRecord:
     return SampleRecord(
         sample_id=sample_id,
@@ -446,6 +453,7 @@ def build_sample_record(
         label_name=label_name,
         eeg_shape="x".join(str(dim) for dim in eeg.shape),
         fmri_shape="x".join(str(dim) for dim in fmri.shape),
+        training_ready=bool(training_ready),
     )
 
 
@@ -536,6 +544,7 @@ def main() -> None:
                         sample_mode=args.sample_mode,
                     )
                     eeg = maybe_patch_eeg(eeg, seq_len=eeg_seq_len, patch_len=eeg_patch_len)
+                eeg = prepare_training_ready_eeg(eeg, enabled=bool(args.training_ready))
 
                 if args.fmri_mode == "roi":
                     fmri = extract_roi_timeseries(
@@ -568,6 +577,7 @@ def main() -> None:
                         max_shape=tuple(args.fmri_max_shape),
                         use_float16=bool(args.fmri_float16),
                     )
+                fmri = prepare_training_ready_fmri(fmri, fmri_mode=args.fmri_mode, enabled=bool(args.training_ready))
 
                 sample_id = f"{subject}_{task}"
                 if args.pack_subject_files:
@@ -595,6 +605,7 @@ def main() -> None:
                             label_name=task,
                             eeg=eeg,
                             fmri=fmri,
+                            training_ready=bool(args.training_ready),
                         )
                     )
                 continue
@@ -662,6 +673,7 @@ def main() -> None:
                         duration_sec=duration_sec,
                     )
                     eeg_block = maybe_patch_eeg(eeg_block, seq_len=eeg_seq_len, patch_len=eeg_patch_len)
+                eeg_block = prepare_training_ready_eeg(eeg_block, enabled=bool(args.training_ready))
 
                 if args.fmri_mode == "roi":
                     fmri_block = slice_fmri_block(fmri_full, tr=args.tr, start_sec=placement.fmri_start_sec, duration_sec=duration_sec)
@@ -674,6 +686,7 @@ def main() -> None:
                     )
                 else:
                     fmri_block = slice_fmri_volume_block(fmri_full, tr=args.tr, start_sec=placement.fmri_start_sec, duration_sec=duration_sec)
+                fmri_block = prepare_training_ready_fmri(fmri_block, fmri_mode=args.fmri_mode, enabled=bool(args.training_ready))
 
                 if args.label_mode == "binary_rest_task":
                     label, label_name = resolve_binary_label(trial_type)
@@ -707,6 +720,7 @@ def main() -> None:
                             label_name=label_name,
                             eeg=eeg_block,
                             fmri=fmri_block,
+                            training_ready=bool(args.training_ready),
                         )
                     )
 
@@ -737,6 +751,7 @@ def main() -> None:
                     eeg_shape="x".join(str(dim) for dim in packed_eeg.shape),
                     fmri_shape="x".join(str(dim) for dim in packed_fmri.shape),
                     label_shape="x".join(str(dim) for dim in packed_labels_array.shape),
+                    training_ready=bool(args.training_ready),
                 )
             )
 

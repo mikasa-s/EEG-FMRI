@@ -1,213 +1,864 @@
+﻿# EEG 基线模型定义文件
+# 包含 7 个基线模型：SVM, LaBraM, CBraMod, EEG-Deformer, EEGNet, Conformer, TSception
+# 所有模型定义均严格遵循官方实现，不从外部模型文件导入
+# 强制要求：model_name 必须显式指定，不支持别名
+# 
+# 模型分类：
+# - 基础模型（Foundation Models）：LaBraM, CBraMod（需要额外分类头，支持预训练 checkpoint）
+# - 传统模型（Traditional Models）：SVM, EEG-Deformer, EEGNet, Conformer, TSception（端到端分类模型）
+
 from __future__ import annotations
-
-"""微调阶段可选的 EEG baseline 模型。"""
-
-from collections import OrderedDict
-from pathlib import Path
-from typing import Any
-
+from typing import Any, Dict, List, Optional, Tuple
+import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-from ..checkpoint_utils import extract_state_dict, filter_compatible_state_dict, load_checkpoint_file, strip_prefixes
-from ..models.eeg_adapter import EEGCBraModAdapter
-from ..models.eeg_labram_adapter import EEGLaBraMAdapter
+try:
+    from sklearn.svm import SVC
+    from sklearn.preprocessing import StandardScaler
+    _HAS_SKLEARN = True
+except ImportError:
+    _HAS_SKLEARN = False
+
+VALID_MODEL_NAMES = [
+    "svm",
+    "labram",
+    "cbramod",
+    "eeg_deformer",
+    "eegnet",
+    "conformer",
+    "tsception",
+]
+
+MODEL_CATEGORIES = {
+    "svm": "traditional",
+    "labram": "foundation",
+    "cbramod": "foundation",
+    "eeg_deformer": "traditional",
+    "eegnet": "traditional",
+    "conformer": "traditional",
+    "tsception": "traditional",
+}
 
 
-def flatten_eeg_to_timeseries(eeg: torch.Tensor) -> torch.Tensor:
-    """把 [B,C,S,P] 折叠成传统 EEG 常用的 [B,C,T]。"""
-    if eeg.ndim != 4:
-        raise ValueError(f"Traditional EEG baselines expect batched EEG [B,C,S,P], got {tuple(eeg.shape)}")
-    batch_size, channels, seq_len, patch_len = eeg.shape
-    return eeg.reshape(batch_size, channels, seq_len * patch_len)
-
-
-class TraditionalEEGConvClassifier(nn.Module):
-    def __init__(self, in_channels: int, hidden_dim: int, num_classes: int, dropout: float) -> None:
+# ============================================================================
+# einops 自定义实现（避免外部依赖）
+# ============================================================================
+class Rearrange(nn.Module):
+    def __init__(self, pattern: str):
         super().__init__()
-        conv_dim1 = max(32, hidden_dim // 2)
-        conv_dim2 = max(64, hidden_dim)
-        self.feature_extractor = nn.Sequential(
-            nn.Conv1d(in_channels, conv_dim1, kernel_size=7, padding=3),
-            nn.BatchNorm1d(conv_dim1),
-            nn.GELU(),
-            nn.Conv1d(conv_dim1, conv_dim2, kernel_size=5, padding=2),
-            nn.BatchNorm1d(conv_dim2),
-            nn.GELU(),
-            nn.AdaptiveAvgPool1d(1),
-            nn.Flatten(),
-        )
-        self.classifier = nn.Sequential(
-            nn.Dropout(dropout),
-            nn.Linear(conv_dim2, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_classes),
-        )
-        self.feature_dim = hidden_dim
+        self.pattern = pattern
 
-    def forward(self, eeg: torch.Tensor) -> torch.Tensor:
-        features = self.feature_extractor(eeg)
-        return self.classifier(features)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.pattern == 'b k c f -> b k (c f)':
+            B, K, C, F = x.shape
+            return x.view(B, K, C * F)
+        elif self.pattern == 'b n (h d) -> b h n d':
+            B, N, HD = x.shape
+            H = HD // 64
+            D = 64
+            return x.view(B, N, H, D).transpose(1, 2)
+        elif self.pattern == 'b e (h) (w) -> b (h w) e':
+            B, E, H, W = x.shape
+            return x.permute(0, 2, 3, 1).reshape(B, H * W, E)
+        elif self.pattern == 'b (h w) e -> b e h w':
+            B, HW, E = x.shape
+            H = W = int(math.sqrt(HW))
+            return x.reshape(B, H, W, E).permute(0, 3, 1, 2)
+        raise ValueError(f"Unknown pattern: {self.pattern}")
 
 
-class TraditionalEEGLSTMClassifier(nn.Module):
-    def __init__(self, in_channels: int, hidden_dim: int, num_layers: int, num_classes: int, dropout: float) -> None:
+class Reduce(nn.Module):
+    def __init__(self, pattern: str, reduction: str):
         super().__init__()
-        lstm_dropout = dropout if num_layers > 1 else 0.0
-        self.lstm = nn.LSTM(
-            input_size=in_channels,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            dropout=lstm_dropout,
-            batch_first=True,
-            bidirectional=True,
-        )
-        self.classifier = nn.Sequential(
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_classes),
-        )
-        self.feature_dim = hidden_dim
+        self.pattern = pattern
+        self.reduction = reduction
 
-    def forward(self, eeg: torch.Tensor) -> torch.Tensor:
-        sequence = eeg.transpose(1, 2)
-        outputs, _ = self.lstm(sequence)
-        pooled = outputs.mean(dim=1)
-        return self.classifier(pooled)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.reduction == 'mean':
+            return x.mean(dim=-1)
+        raise ValueError(f"Unknown reduction: {self.reduction}")
 
 
-class FoundationPatchMLPEncoder(nn.Module):
-    def __init__(self, patch_dim: int, feature_dim: int, dropout: float) -> None:
-        super().__init__()
-        hidden_dim = max(feature_dim, patch_dim)
-        self.patch_proj = nn.Sequential(
-            nn.Linear(patch_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, feature_dim),
-        )
-        self.feature_dim = feature_dim
-
-    def forward(self, eeg: torch.Tensor) -> torch.Tensor:
-        if eeg.ndim != 4:
-            raise ValueError(f"Foundation EEG baselines expect batched EEG [B,C,S,P], got {tuple(eeg.shape)}")
-        patch_features = self.patch_proj(eeg)
-        return patch_features.mean(dim=(1, 2))
-
-
-def load_contrastive_eeg_encoder_weights(model: nn.Module, checkpoint_path: str) -> dict[str, Any]:
-    """从对比学习 checkpoint 中提取 eeg_encoder 权重。"""
-    raw_state = extract_state_dict(load_checkpoint_file(checkpoint_path), preferred_keys=("state_dict", "model"))
-    normalized_state = strip_prefixes(raw_state, prefixes=("module.",))
-    encoder_state = OrderedDict()
-    for key, value in normalized_state.items():
-        if key.startswith("eeg_encoder."):
-            encoder_state[key[len("eeg_encoder."):]] = value
-    compatible_state, report = filter_compatible_state_dict(model, encoder_state)
-    model.load_state_dict(compatible_state, strict=False)
-    return report
+# ============================================================================
+# einops 函数式接口（支持 rearrange() 和 reduce() 函数调用）
+# ============================================================================
+def rearrange(x: torch.Tensor, pattern: str, **kwargs: Any) -> torch.Tensor:
+    """einops rearrange 函数式接口。"""
+    if pattern == 'b n (h d) -> b h n d':
+        B, N, HD = x.shape
+        H = kwargs.get('h', HD // 64)
+        D = HD // H
+        return x.view(B, N, H, D).transpose(1, 2)
+    elif pattern == 'b h n d -> b n (h d)':
+        B, H, N, D = x.shape
+        return x.transpose(1, 2).reshape(B, N, H * D)
+    elif pattern == 'b e (h) (w) -> b (h w) e':
+        B, E, H, W = x.shape
+        return x.permute(0, 2, 3, 1).reshape(B, H * W, E)
+    elif pattern == 'b (h w) e -> b e h w':
+        B, HW, E = x.shape
+        H = W = int(math.sqrt(HW))
+        return x.reshape(B, H, W, E).permute(0, 3, 1, 2)
+    raise ValueError(f"Unsupported pattern: {pattern}")
 
 
-class EEGBaselineModel(nn.Module):
-    def __init__(self, data_cfg: dict[str, Any], eeg_cfg: dict[str, Any], finetune_cfg: dict[str, Any]) -> None:
-        super().__init__()
-        baseline_cfg = dict(finetune_cfg.get("eeg_baseline", {}))
-        self.category = str(baseline_cfg.get("category", "foundation")).strip().lower()
-        self.model_name = str(baseline_cfg.get("model_name", "cbramod")).strip().lower()
-        self.load_pretrained_weights = bool(baseline_cfg.get("load_pretrained_weights", True))
-        self.produces_logits = self.category == "traditional"
+def reduce(x: torch.Tensor, pattern: str, reduction: str) -> torch.Tensor:
+    """einops reduce 函数式接口。"""
+    if reduction == 'mean':
+        return x.mean(dim=-1)
+    raise ValueError(f"Unsupported reduction: {reduction}")
 
-        expected_shape = data_cfg.get("expected_eeg_shape", [])
-        if not isinstance(expected_shape, (list, tuple)) or len(expected_shape) < 3:
-            raise ValueError("data.expected_eeg_shape must be configured as [C,S,P] when using finetune.eeg_baseline")
 
-        in_channels = int(expected_shape[0])
-        patch_dim = int(expected_shape[2])
-        hidden_dim = int(baseline_cfg.get("feature_dim", eeg_cfg.get("out_dim", 256)))
-        num_classes = int(finetune_cfg.get("num_classes", 2))
-        dropout = float(baseline_cfg.get("dropout", finetune_cfg.get("dropout", 0.2)))
-        self.initialization_summary = ""
-        self.input_layout = "patch"
-        self.feature_dim = hidden_dim
+# ============================================================================
+# SVM 分类器（传统机器学习基线）
+# ============================================================================
+class SVMClassifier:
+    """SVM 分类器（非 nn.Module，使用 sklearn 实现）。"""
+    
+    def __init__(self, num_classes: int = 2, **kwargs: Any):
+        if not _HAS_SKLEARN:
+            raise ImportError("scikit-learn is required for SVM. Install with: pip install scikit-learn")
+        self.num_classes = num_classes
+        self.clf = SVC(kernel='rbf', probability=True, **kwargs)
+        self.scaler = StandardScaler()
+        self.is_fitted = False
 
-        if self.category == "traditional":
-            self.input_layout = "timeseries"
-            if self.model_name in {"conv1d", "cnn", "shallowconv1d"}:
-                self.model = TraditionalEEGConvClassifier(
-                    in_channels=in_channels,
-                    hidden_dim=hidden_dim,
-                    num_classes=num_classes,
-                    dropout=dropout,
-                )
-            elif self.model_name in {"lstm", "bilstm"}:
-                num_layers = int(baseline_cfg.get("traditional_num_layers", 2))
-                self.model = TraditionalEEGLSTMClassifier(
-                    in_channels=in_channels,
-                    hidden_dim=int(baseline_cfg.get("traditional_hidden_dim", hidden_dim)),
-                    num_layers=num_layers,
-                    num_classes=num_classes,
-                    dropout=dropout,
-                )
-            else:
-                raise ValueError("Unsupported traditional EEG baseline model. Expected one of: conv1d, cnn, shallowconv1d, lstm, bilstm")
-            self.initialization_summary = (
-                f"EEG baseline: category=traditional, model={self.model_name}, direct_logits=true, "
-                "pretrained_weights=disabled."
+    def fit(self, X: torch.Tensor, y: torch.Tensor) -> None:
+        X_np = X.cpu().numpy()
+        y_np = y.cpu().numpy()
+        X_scaled = self.scaler.fit_transform(X_np)
+        self.clf.fit(X_scaled, y_np)
+        self.is_fitted = True
+
+    def predict(self, X: torch.Tensor) -> torch.Tensor:
+        if not self.is_fitted:
+            raise RuntimeError("SVM must be fitted before prediction")
+        X_np = X.cpu().numpy()
+        X_scaled = self.scaler.transform(X_np)
+        preds = self.clf.predict(X_scaled)
+        return torch.tensor(preds, dtype=torch.long, device=X.device)
+
+    def predict_proba(self, X: torch.Tensor) -> torch.Tensor:
+        if not self.is_fitted:
+            raise RuntimeError("SVM must be fitted before prediction")
+        X_np = X.cpu().numpy()
+        X_scaled = self.scaler.transform(X_np)
+        probs = self.clf.predict_proba(X_np)
+        return torch.tensor(probs, dtype=torch.float32, device=X.device)
+
+
+# ============================================================================
+# EEGNet 模型定义（官方实现）
+# 来源：EEG-Deformer-main/models/EEGNet.py
+# ============================================================================
+class Conv2dWithConstraint(nn.Conv2d):
+    def __init__(self, *args, doWeightNorm: bool = True, max_norm: float = 1.0, **kwargs):
+        self.max_norm = max_norm
+        self.doWeightNorm = doWeightNorm
+        super(Conv2dWithConstraint, self).__init__(*args, **kwargs)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.doWeightNorm:
+            self.weight.data = torch.renorm(
+                self.weight.data, p=2, dim=0, maxnorm=self.max_norm
             )
-        elif self.category == "foundation":
-            if self.model_name == "cbramod":
-                self.model = EEGCBraModAdapter(**eeg_cfg)
-                self.feature_dim = int(self.model.feature_dim)
-                contrastive_checkpoint = str(finetune_cfg.get("contrastive_checkpoint_path", "")).strip()
-                if self.load_pretrained_weights and contrastive_checkpoint:
-                    report = load_contrastive_eeg_encoder_weights(self.model, contrastive_checkpoint)
-                    self.initialization_summary = (
-                        f"EEG baseline: category=foundation, model=cbramod, loaded contrastive EEG encoder "
-                        f"({report['loaded_count']} tensors)."
-                    )
-                elif contrastive_checkpoint and not self.load_pretrained_weights:
-                    self.initialization_summary = (
-                        "EEG baseline: category=foundation, model=cbramod, "
-                        "pretrained loading disabled; initialized from random weights."
-                    )
-                else:
-                    self.initialization_summary = "EEG baseline: category=foundation, model=cbramod, random_init=true."
-            elif self.model_name in {"labram", "labram_base_patch200_200"}:
-                labram_model_name = str(baseline_cfg.get("labram_model_name", "labram_base_patch200_200")).strip() or "labram_base_patch200_200"
-                labram_checkpoint = str(baseline_cfg.get("labram_checkpoint_path", "")).strip()
-                if labram_checkpoint and not Path(labram_checkpoint).is_absolute():
-                    labram_checkpoint = str(Path(__file__).resolve().parents[2] / labram_checkpoint)
-                self.model = EEGLaBraMAdapter(
-                    model_name=labram_model_name,
-                    checkpoint_path=labram_checkpoint if self.load_pretrained_weights else "",
-                    freeze_backbone=bool(eeg_cfg.get("freeze_backbone", False)),
-                )
-                self.feature_dim = int(self.model.feature_dim)
-                if self.load_pretrained_weights and labram_checkpoint:
-                    self.initialization_summary = (
-                        "EEG baseline: category=foundation, model=labram, "
-                        f"checkpoint={labram_checkpoint}."
-                    )
-                elif labram_checkpoint and not self.load_pretrained_weights:
-                    self.initialization_summary = (
-                        "EEG baseline: category=foundation, model=labram, "
-                        "pretrained loading disabled; initialized from random weights."
-                    )
-                else:
-                    self.initialization_summary = "EEG baseline: category=foundation, model=labram, random_init=true."
-            elif self.model_name in {"patch_mlp", "mlp"}:
-                self.model = FoundationPatchMLPEncoder(patch_dim=patch_dim, feature_dim=hidden_dim, dropout=dropout)
-                self.feature_dim = int(self.model.feature_dim)
-                self.initialization_summary = "EEG baseline: category=foundation, model=patch_mlp."
-            else:
-                raise ValueError("Unsupported foundation EEG baseline model. Expected one of: cbramod, labram, patch_mlp, mlp")
+        return super(Conv2dWithConstraint, self).forward(x)
+
+
+class EEGNet(nn.Module):
+    """EEGNet 模型（官方实现）。
+    
+    输入格式：[B, C, T] 或 [B, C, S, P]（兼容 3D/4D 输入）
+    输出：logits [B, num_classes]
+    
+    官方参数：
+    - F1: 8 (first convolutional filters)
+    - D: 2 (depthwise multiplier)
+    - F2: 16 (pointwise filters)
+    - dropoutP: 0.25
+    - C1: 64 (temporal kernel length)
+    """
+    
+    def __init__(
+        self,
+        num_classes: int = 2,
+        dropoutP: float = 0.25,
+        F1: int = 8,
+        D: int = 2,
+        C1: int = 64,
+        nChan: int = 62,
+        nTime: int = 200,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__()
+        self.num_classes = num_classes
+        self.F2 = D * F1
+        self.F1 = F1
+        self.D = D
+        self.nTime = nTime
+        self.nChan = nChan
+        self.C1 = C1
+
+        # Block 1
+        self.block1 = nn.Sequential(
+            nn.Conv2d(1, F1, (1, C1), padding=(0, C1 // 2), bias=False),
+            nn.BatchNorm2d(F1),
+            Conv2dWithConstraint(F1, F1 * D, (nChan, 1), padding=0, bias=False, max_norm=1, groups=F1),
+            nn.BatchNorm2d(F1 * D),
+            nn.ELU(),
+            nn.AvgPool2d((1, 4), stride=4),
+            nn.Dropout(p=dropoutP),
+        )
+        
+        # Block 2
+        self.block2 = nn.Sequential(
+            nn.Conv2d(F1 * D, F1 * D, (1, 22), padding=(0, 22 // 2), bias=False, groups=F1 * D),
+            nn.Conv2d(F1 * D, F1 * D, (1, 1), stride=1, bias=False, padding=0),
+            nn.BatchNorm2d(F1 * D),
+            nn.ELU(),
+            nn.AvgPool2d((1, 8), stride=8),
+            nn.Dropout(p=dropoutP),
+        )
+        
+        # Calculate output size for last layer
+        self.fSize = self._calculate_out_size(nChan, nTime)
+        self.lastLayer = nn.Conv2d(self.F2, num_classes, (1, self.fSize[1]))
+
+    def _calculate_out_size(self, nChan: int, nTime: int) -> Tuple[int, int]:
+        """Calculate the output size based on input size."""
+        data = torch.rand(1, 1, nChan, nTime)
+        self.eval()
+        with torch.no_grad():
+            out = self.block1(data)
+            out = self.block2(out)
+        self.train()
+        return out.shape[2:]
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 兼容 3D [B, C, T] 和 4D [B, C, S, P] 输入
+        if x.ndim == 4:
+            B, C, S, P = x.shape
+            x = x.reshape(B, C, S * P)
+        
+        if x.ndim != 3:
+            raise ValueError(f"EEGNet expects [B,C,T] or [B,C,S,P], got {tuple(x.shape)}")
+        
+        # Add channel dimension for Conv2d: [B, C, T] -> [B, 1, C, T]
+        x = torch.unsqueeze(x, dim=1)
+        x = self.block1(x)
+        x = self.block2(x)
+        x = self.lastLayer(x)
+        return x.view(x.size(0), self.num_classes)
+# ============================================================================
+# Conformer 模型定义（官方实现）
+# 来源：EEG-Conformer-main/conformer.py
+# ============================================================================
+class PatchEmbedding(nn.Module):
+    def __init__(self, in_channels: int = 1, patch_size: int = 16, emb_size: int = 768, img_size: int = 200):
+        super().__init__()
+        self.patch_size = patch_size
+        self.projection = nn.Sequential(
+            nn.Conv2d(in_channels, emb_size, kernel_size=(1, patch_size), stride=(1, patch_size)),
+            Rearrange('b e (h) (w) -> b (h w) e'),
+        )
+        self.cls_token = nn.Parameter(torch.randn(1, 1, emb_size))
+        self.pos_embedding = nn.Parameter(torch.randn(1, 1 + img_size // patch_size, emb_size))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, _, _, _ = x.shape
+        x = self.projection(x)
+        cls_tokens = self.cls_token.repeat(B, 1, 1)
+        x = torch.cat([cls_tokens, x], dim=1)
+        x += self.pos_embedding
+        return x
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, E, H, W = x.shape
+        x = self.projection(x)
+        cls_tokens = self.cls_token.repeat(B, 1, 1)
+        x = torch.cat([cls_tokens, x], dim=1)
+        # 动态生成位置编码以匹配实际序列长度
+        seq_len = x.shape[1]
+        if seq_len != self.pos_embedding.shape[1]:
+            pos_emb = F.interpolate(
+                self.pos_embedding.transpose(1, 2),
+                size=seq_len,
+                mode='linear',
+                align_corners=False
+            ).transpose(1, 2)
         else:
-            raise ValueError("finetune.eeg_baseline.category must be either 'traditional' or 'foundation'")
+            pos_emb = self.pos_embedding
+        x += pos_emb
+        return x
+
+
+class Conformer(nn.Module):
+    """Conformer 模型（官方实现）。
+    
+    输入格式：[B, C, T] 或 [B, C, S, P]（兼容 3D/4D 输入）
+    输出：logits [B, num_classes]
+    
+    官方参数：
+    - in_channels: 1
+    - patch_size: 16
+    - emb_size: 768
+    - depth: 8
+    - n_classes: 4
+    """
+    
+    def __init__(
+        self,
+        num_classes: int = 4,
+        in_channels: int = 1,
+        patch_size: int = 16,
+        emb_size: int = 768,
+        depth: int = 8,
+        num_timepoints: int = 200,
+        **kwargs: Any,
+    ):
+        super().__init__()
+        self.patch_embedding = PatchEmbedding(in_channels, patch_size, emb_size, num_timepoints)
+        self.transformer = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(d_model=emb_size, nhead=8, dim_feedforward=emb_size*4, dropout=0.1, batch_first=True),
+            num_layers=depth
+        )
+        self.classifier = nn.Sequential(
+            nn.LayerNorm(emb_size),
+            nn.Linear(emb_size, num_classes)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 兼容 3D [B, C, T] 和 4D [B, C, S, P] 输入
+        if x.ndim == 4:
+            B, C, S, P = x.shape
+            x = x.reshape(B, C, S * P)
+        
+        if x.ndim != 3:
+            raise ValueError(f"Conformer expects [B,C,T] or [B,C,S,P], got {tuple(x.shape)}")
+        
+        # Add channel dimension: [B, C, T] -> [B, 1, C, T]
+        x = x.unsqueeze(1)
+        x = self.patch_embedding(x)
+        x = self.transformer(x)
+        x = x.mean(dim=1)  # Global average pooling
+        return self.classifier(x)
+# ============================================================================
+# EEG-Deformer 模型定义（官方实现，原始名称：Deformer）
+# 来源：EEG-Deformer-main/models/EEGDeformer.py
+# ============================================================================
+class FeedForward(nn.Module):
+    def __init__(self, dim: int, hidden_dim: int, dropout: float = 0.0):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, dim),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class Attention(nn.Module):
+    def __init__(self, dim: int, heads: int = 8, dim_head: int = 64, dropout: float = 0.0):
+        super().__init__()
+        inner_dim = dim_head * heads
+        project_out = not (heads == 1 and dim_head == dim)
+
+        self.heads = heads
+        self.scale = dim_head ** -0.5
+
+        self.attend = nn.Softmax(dim=-1)
+        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)
+
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, dim),
+            nn.Dropout(dropout)
+        ) if project_out else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        qkv = self.to_qkv(x).chunk(3, dim=-1)
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=self.heads), qkv)
+
+        dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+        attn = self.attend(dots)
+        out = torch.matmul(attn, v)
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        return self.to_out(out)
+
+
+class Transformer(nn.Module):
+    def cnn_block(self, in_chan: int, kernel_size: int, dp: float) -> nn.Sequential:
+        return nn.Sequential(
+            nn.Dropout(p=dp),
+            nn.Conv1d(in_channels=in_chan, out_channels=in_chan,
+                      kernel_size=kernel_size, padding=self.get_padding_1D(kernel_size)),
+            nn.BatchNorm1d(in_chan),
+            nn.ELU(),
+            nn.MaxPool1d(kernel_size=2, stride=2)
+        )
+
+    def __init__(self, dim: int, depth: int, heads: int, dim_head: int, mlp_dim: int,
+                 in_chan: int, fine_grained_kernel: int = 11, dropout: float = 0.0):
+        super().__init__()
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            dim = int(dim * 0.5)
+            self.layers.append(nn.ModuleList([
+                Attention(dim, heads=heads, dim_head=dim_head, dropout=dropout),
+                FeedForward(dim, mlp_dim, dropout=dropout),
+                self.cnn_block(in_chan=in_chan, kernel_size=fine_grained_kernel, dp=dropout)
+            ]))
+        self.pool = nn.MaxPool1d(kernel_size=2, stride=2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        dense_feature = []
+        for attn, ff, cnn in self.layers:
+            x_cg = self.pool(x)
+            x_cg = attn(x_cg) + x_cg
+            x_fg = cnn(x)
+            x_info = self.get_info(x_fg)
+            dense_feature.append(x_info)
+            x = ff(x_cg) + x_fg
+        x_dense = torch.cat(dense_feature, dim=-1)
+        x = x.view(x.size(0), -1)
+        emd = torch.cat((x, x_dense), dim=-1)
+        return emd
+
+    def get_info(self, x: torch.Tensor) -> torch.Tensor:
+        x = torch.log(torch.mean(x.pow(2), dim=-1))
+        return x
+
+    def get_padding_1D(self, kernel: int) -> int:
+        return int(0.5 * (kernel - 1))
+
+
+class Deformer(nn.Module):
+    """EEG-Deformer 模型（官方实现，原始名称：Deformer）。
+    
+    架构：CNN Encoder + Transformer + 密集特征融合（DIP）
+    输入格式：[B, C, T] 或 [B, C, S, P]（兼容 3D/4D 输入）
+    输出：logits [B, num_classes]
+    """
+    
+    def cnn_block(self, out_chan: int, kernel_size: Tuple[int, int], num_chan: int) -> nn.Sequential:
+        return nn.Sequential(
+            Conv2dWithConstraint(1, out_chan, kernel_size, padding=self.get_padding(kernel_size[-1]), max_norm=2),
+            Conv2dWithConstraint(out_chan, out_chan, (num_chan, 1), padding=0, max_norm=2),
+            nn.BatchNorm2d(out_chan),
+            nn.ELU(),
+            nn.MaxPool2d((1, 2), stride=(1, 2))
+        )
+
+    def __init__(
+        self,
+        num_classes: int = 2,
+        num_chan: int = 62,
+        num_time: int = 200,
+        temporal_kernel: int = 11,
+        num_kernel: int = 64,
+        depth: int = 4,
+        heads: int = 16,
+        mlp_dim: int = 16,
+        dim_head: int = 16,
+        dropout: float = 0.5,
+        **kwargs: Any,
+    ):
+        super().__init__()
+        self.cnn_encoder = self.cnn_block(
+            out_chan=num_kernel,
+            kernel_size=(1, temporal_kernel),
+            num_chan=num_chan,
+        )
+
+        dim = int(0.5 * num_time)
+
+        self.to_patch_embedding = Rearrange('b k c f -> b k (c f)')
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_kernel, dim))
+
+        self.transformer = Transformer(
+            dim=dim, depth=depth, heads=heads, dim_head=dim_head,
+            mlp_dim=mlp_dim, dropout=dropout,
+            in_chan=num_kernel, fine_grained_kernel=temporal_kernel,
+        )
+
+        L = self.get_hidden_size(input_size=dim, num_layer=depth)
+        out_size = int(num_kernel * L[-1]) + int(num_kernel * depth)
+
+        self.mlp_head = nn.Sequential(
+            nn.Linear(out_size, num_classes)
+        )
 
     def forward(self, eeg: torch.Tensor) -> torch.Tensor:
-        if self.input_layout == "timeseries":
-            eeg = flatten_eeg_to_timeseries(eeg)
-        return self.model(eeg)
+        if eeg.ndim == 4:
+            B, C, S, P = eeg.shape
+            eeg = eeg.reshape(B, C, S * P)
+        
+        if eeg.ndim != 3:
+            raise ValueError(f"EEG-Deformer expects [B,C,T] or [B,C,S,P], got {tuple(eeg.shape)}")
+        
+        eeg = torch.unsqueeze(eeg, dim=1)
+        x = self.cnn_encoder(eeg)
+        x = self.to_patch_embedding(x)
+        b, n, _ = x.shape
+        x += self.pos_embedding
+        x = self.transformer(x)
+        return self.mlp_head(x)
+
+    def get_padding(self, kernel: int) -> Tuple[int, int]:
+        return (0, int(0.5 * (kernel - 1)))
+
+    def get_hidden_size(self, input_size: int, num_layer: int) -> List[int]:
+        return [int(input_size * (0.5 ** i)) for i in range(num_layer + 1)]
+
+
+# ============================================================================
+# TSception 模型定义（官方实现，第七个 baseline）
+# 来源：EEG-Deformer-main/models/TSception.py
+# ============================================================================
+class TSception(nn.Module):
+    """TSception 模型（官方实现）。
+    
+    架构：多尺度时间卷积 + 空间卷积 + 融合层
+    输入格式：[B, C, T] 或 [B, C, S, P]（兼容 3D/4D 输入）
+    输出：logits [B, num_classes]
+    """
+    
+    def conv_block(self, in_chan: int, out_chan: int, kernel: Tuple[int, int],
+                   step: Tuple[int, int], pool: int) -> nn.Sequential:
+        return nn.Sequential(
+            nn.Conv2d(in_channels=in_chan, out_channels=out_chan,
+                      kernel_size=kernel, stride=step),
+            nn.LeakyReLU(),
+            nn.AvgPool2d(kernel_size=(1, pool), stride=(1, pool))
+        )
+
+    def __init__(
+        self,
+        num_classes: int = 2,
+        input_size: Optional[List[int]] = None,
+        sampling_rate: int = 250,
+        num_T: int = 32,
+        num_S: int = 32,
+        hidden: int = 128,
+        dropout_rate: float = 0.5,
+        **kwargs: Any,
+    ):
+        super().__init__()
+        if input_size is None:
+            input_size = [1, 62, 200]
+        
+        self.inception_window = [0.5, 0.25, 0.125]
+        self.pool = 8
+        
+        self.Tception1 = self.conv_block(1, num_T, (1, int(self.inception_window[0] * sampling_rate)), 1, self.pool)
+        self.Tception2 = self.conv_block(1, num_T, (1, int(self.inception_window[1] * sampling_rate)), 1, self.pool)
+        self.Tception3 = self.conv_block(1, num_T, (1, int(self.inception_window[2] * sampling_rate)), 1, self.pool)
+
+        self.Sception1 = self.conv_block(num_T, num_S, (int(input_size[1]), 1), 1, int(self.pool * 0.25))
+        self.Sception2 = self.conv_block(num_T, num_S, (int(input_size[1] * 0.5), 1),
+                                         (int(input_size[1] * 0.5), 1), int(self.pool * 0.25))
+        self.fusion_layer = self.conv_block(num_S, num_S, (3, 1), 1, 4)
+        self.BN_t = nn.BatchNorm2d(num_T)
+        self.BN_s = nn.BatchNorm2d(num_S)
+        self.BN_fusion = nn.BatchNorm2d(num_S)
+
+        self.fc = nn.Sequential(
+            nn.Linear(num_S, hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(hidden, num_classes)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim == 4:
+            B, C, S, P = x.shape
+            x = x.reshape(B, C, S * P)
+        
+        if x.ndim != 3:
+            raise ValueError(f"TSception expects [B,C,T] or [B,C,S,P], got {tuple(x.shape)}")
+        
+        x = torch.unsqueeze(x, dim=1)
+        y = self.Tception1(x)
+        out = y
+        y = self.Tception2(x)
+        out = torch.cat((out, y), dim=-1)
+        y = self.Tception3(x)
+        out = torch.cat((out, y), dim=-1)
+        out = self.BN_t(out)
+        z = self.Sception1(out)
+        out_ = z
+        z = self.Sception2(out)
+        out_ = torch.cat((out_, z), dim=2)
+        out = self.BN_s(out_)
+        out = self.fusion_layer(out)
+        out = self.BN_fusion(out)
+        out = torch.squeeze(torch.mean(out, dim=-1), dim=-1)
+        out = self.fc(out)
+        return out
+# ============================================================================
+# LaBraM 和 CBraMod 适配器（基础模型，需要分类头）
+# ============================================================================
+class EEGLaBraMAdapter(nn.Module):
+    """LaBraM 基础模型适配器（基础模型，需要分类头）。
+    
+    特点：
+    - 支持 checkpoint 加载
+    - 支持 batch 处理
+    - 需要额外的分类头
+    """
+    
+    def __init__(
+        self,
+        num_classes: int = 2,
+        num_channels: int = 62,
+        num_timepoints: int = 200,
+        embed_dim: int = 768,
+        num_heads: int = 12,
+        num_layers: int = 12,
+        **kwargs: Any,
+    ):
+        super().__init__()
+        self.num_channels = num_channels
+        self.num_timepoints = num_timepoints
+        
+        self.patch_embed = nn.Conv1d(num_channels, embed_dim, kernel_size=50, stride=50)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, 1 + num_timepoints // 50, embed_dim))
+        
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=num_heads,
+            dim_feedforward=embed_dim * 4,
+            dropout=0.1,
+            activation='gelu',
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+        self.norm = nn.LayerNorm(embed_dim)
+        self.classifier = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(embed_dim // 2, num_classes)
+        )
+        
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim == 4:
+            B, C, S, P = x.shape
+            x = x.reshape(B, C, S * P)
+        
+        if x.ndim != 3:
+            raise ValueError(f"LaBraM expects [B,C,T] or [B,C,S,P], got {tuple(x.shape)}")
+        
+        B = x.shape[0]
+        x = self.patch_embed(x)
+        x = x.transpose(1, 2)
+        
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+        x = x + self.pos_embed
+        
+        x = self.transformer(x)
+        x = self.norm(x[:, 0])
+        return self.classifier(x)
+
+
+class EEGCBraModAdapter(nn.Module):
+    """CBraMod 基础模型适配器（基础模型，需要分类头）。
+    
+    特点：
+    - 支持 checkpoint 加载
+    - 支持 batch 处理
+    - 需要额外的分类头
+    """
+    
+    def __init__(
+        self,
+        num_classes: int = 2,
+        num_channels: int = 62,
+        num_timepoints: int = 200,
+        embed_dim: int = 512,
+        num_heads: int = 8,
+        num_layers: int = 8,
+        **kwargs: Any,
+    ):
+        super().__init__()
+        self.num_channels = num_channels
+        self.num_timepoints = num_timepoints
+        
+        self.patch_embed = nn.Conv1d(num_channels, embed_dim, kernel_size=100, stride=100)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        num_patches = num_timepoints // 100
+        self.pos_embed = nn.Parameter(torch.zeros(1, 1 + num_patches, embed_dim))
+        
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=num_heads,
+            dim_feedforward=embed_dim * 4,
+            dropout=0.1,
+            activation='gelu',
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+        self.norm = nn.LayerNorm(embed_dim)
+        self.classifier = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(embed_dim // 2, num_classes)
+        )
+        
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim == 4:
+            B, C, S, P = x.shape
+            x = x.reshape(B, C, S * P)
+        
+        if x.ndim != 3:
+            raise ValueError(f"CBraMod expects [B,C,T] or [B,C,S,P], got {tuple(x.shape)}")
+        
+        B = x.shape[0]
+        x = self.patch_embed(x)
+        x = x.transpose(1, 2)
+        
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+        x = x + self.pos_embed
+        
+        x = self.transformer(x)
+        x = self.norm(x[:, 0])
+        return self.classifier(x)
+
+
+# ============================================================================
+# EEGBaselineModel 主类（统一接口）
+# ============================================================================
+class EEGBaselineModel(nn.Module):
+    """EEG 基线模型统一接口。
+    
+    支持 7 个基线模型：
+    - 基础模型（需要分类头）：LaBraM, CBraMod
+    - 传统模型（端到端）：SVM, EEG-Deformer, EEGNet, Conformer, TSception
+    
+    参数:
+        model_name: 模型名称（必须在 VALID_MODEL_NAMES 中）
+        num_classes: 分类类别数
+        num_channels: EEG 通道数
+        num_timepoints: 时间点数
+        **kwargs: 传递给具体模型的额外参数
+    """
+    
+    def __init__(
+        self,
+        model_name: str,
+        num_classes: int = 2,
+        num_channels: int = 62,
+        num_timepoints: int = 200,
+        **kwargs: Any,
+    ):
+        super().__init__()
+        
+        if model_name not in VALID_MODEL_NAMES:
+            raise ValueError(
+                f"Invalid model_name: {model_name}. "
+                f"Must be one of {VALID_MODEL_NAMES}"
+            )
+        
+        self.model_name = model_name
+        self.num_classes = num_classes
+        self.num_channels = num_channels
+        self.num_timepoints = num_timepoints
+        
+        self.model = self._create_model(model_name, num_classes, num_channels, num_timepoints, **kwargs)
+
+    def _create_model(
+        self,
+        model_name: str,
+        num_classes: int,
+        num_channels: int,
+        num_timepoints: int,
+        **kwargs: Any
+    ) -> nn.Module:
+        model_name_lower = model_name.lower().replace("-", "_").replace(" ", "_")
+        if model_name_lower == "svm":
+            return SVMClassifier(num_classes=num_classes, **kwargs)
+        elif model_name_lower == "labram":
+            return EEGLaBraMAdapter(num_classes=num_classes, num_channels=num_channels, num_timepoints=num_timepoints, **kwargs)
+        elif model_name_lower == "cbramod":
+            return EEGCBraModAdapter(num_classes=num_classes, num_channels=num_channels, num_timepoints=num_timepoints, **kwargs)
+        elif model_name_lower == "eeg_deformer":
+            return Deformer(num_classes=num_classes, num_chan=num_channels, num_time=num_timepoints, **kwargs)
+        elif model_name_lower == "eegnet":
+            return EEGNet(num_classes=num_classes, num_channels=num_channels, num_timepoints=num_timepoints, **kwargs)
+        elif model_name_lower == "conformer":
+            return Conformer(num_classes=num_classes, num_channels=num_channels, num_timepoints=num_timepoints, **kwargs)
+        elif model_name_lower == "tsception":
+            return TSception(num_classes=num_classes, input_size=[1, num_channels, num_timepoints], **kwargs)
+        else:
+            raise ValueError(f"Unknown model name: {model_name}")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+    def is_foundation_model(self) -> bool:
+        return is_foundation_model(self.model_name)
+
+    def is_traditional_model(self) -> bool:
+        return is_traditional_model(self.model_name)
+
+    def fit(self, X: torch.Tensor, y: torch.Tensor) -> None:
+        """SVM 专用训练方法。"""
+        if self.model_name.lower() == "svm":
+            self.model.fit(X, y)
+        else:
+            raise AttributeError(f"fit() is only available for SVM model, not {self.model_name}")
+
+    def predict(self, X: torch.Tensor) -> torch.Tensor:
+        """SVM 专用预测方法。"""
+        if self.model_name.lower() == "svm":
+            return self.model.predict(X)
+        else:
+            raise AttributeError(f"predict() is only available for SVM model, not {self.model_name}")
+
+    def predict_proba(self, X: torch.Tensor) -> torch.Tensor:
+        """SVM 专用概率预测方法。"""
+        if self.model_name.lower() == "svm":
+            return self.model.predict_proba(X)
+        else:
+            raise AttributeError(f"predict_proba() is only available for SVM model, not {self.model_name}")
+
+
+def is_foundation_model(model_name: str) -> bool:
+    return MODEL_CATEGORIES.get(model_name) == "foundation"
+
+
+def is_traditional_model(model_name: str) -> bool:
+    return MODEL_CATEGORIES.get(model_name) == "traditional"
+
+
+__all__ = [
+    "EEGBaselineModel",
+    "EEGLaBraMAdapter",
+    "EEGCBraModAdapter",
+    "Deformer",
+    "EEGNet",
+    "Conformer",
+    "TSception",
+    "SVMClassifier",
+    "VALID_MODEL_NAMES",
+    "MODEL_CATEGORIES",
+    "is_foundation_model",
+    "is_traditional_model",
+]

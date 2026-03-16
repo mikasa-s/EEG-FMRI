@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .eeg_adapter import EEGCBraModAdapter
+from .eeg_cbramod_adapter import EEGCBraModAdapter
 from .fmri_adapter import FMRINeuroSTORMAdapter
 
 

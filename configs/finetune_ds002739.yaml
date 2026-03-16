@@ -62,15 +62,12 @@ finetune:
   fusion: eeg_only
   eeg_baseline:
     enabled: false
-    category: foundation
     model_name: cbramod
-    load_pretrained_weights: true
-    feature_dim: 256
-    dropout: 0.2
-    traditional_hidden_dim: 128
-    traditional_num_layers: 2
-    labram_model_name: labram_base_patch200_200
-    labram_checkpoint_path: pretrained_weights/labram-base.pth
+    num_classes: 2
+    num_channels: 62
+    num_timepoints: 200
+    load_pretrained_weights: false
+    checkpoint_path: ""
   hidden_dim: 256
   dropout: 0.2
   freeze_encoders: false

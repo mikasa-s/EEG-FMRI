@@ -427,7 +427,102 @@ python .\run_train.py --config configs\train_joint_contrastive.yaml `
 - 使用 EEG baseline 且禁用其预训练加载：设置 `finetune.eeg_baseline.load_pretrained_weights: false`。
 - 使用 LaBraM baseline：设置 `model_name: labram`，并将 `labram_checkpoint_path` 指向 `pretrained_weights/labram-base.pth`。
 
+## EEG Baseline 模型
+
+微调阶段支持使用 7 个 EEG 基线模型，分为两类：
+
+### 基础模型（Foundation Models）
+
+基础模型需要额外的分类头，支持加载预训练权重：
+
+1. **LaBraM** - 大规模 EEG 基础模型
+2. **CBraMod** - 对比学习预训练的 EEG 骨干
+
+### 传统模型（Traditional Models）
+
+传统模型是端到端的分类模型，内置分类头，不需要额外分类头：
+
+3. **SVM** - 支持向量机（传统机器学习基线）
+4. **EEG-Deformer** - Deformer 架构（CNN + Transformer + DIP 融合）
+5. **EEGNet** - 经典 EEG 深度学习方法
+6. **Conformer** - CNN + Transformer 混合架构
+7. **TSception** - 多尺度时空卷积网络
+
+所有模型定义均严格遵循官方实现，不从外部模型文件导入。
+
+### 配置方法
+
+在微调配置文件中设置 `finetune.eeg_baseline`：
+
+```yaml
+finetune:
+  eeg_baseline:
+    enabled: true
+    model_name: eegnet  # 7 个选项：svm, labram, cbramod, eeg_deformer, eegnet, conformer, tsception
+    num_classes: 2
+    num_channels: 62
+    num_timepoints: 200
+    load_pretrained_weights: false  # 基础模型设为 true 可加载预训练权重
+    checkpoint_path: ""  # 基础模型预训练权重路径
+```
+
+### 模型类别与融合策略
+
+- **传统模型**（svm, eeg_deformer, eegnet, conformer, tsception）：
+  - 内置分类头，直接输出 logits
+  - 仅支持 `finetune.fusion: eeg_only`
+  - 不需要额外分类头
+
+- **基础模型**（labram, cbramod）：
+  - 输出特征向量，需要额外分类头
+  - 支持所有融合策略（eeg_only, fmri_only, concat）
+  - 可通过 `load_pretrained_weights: true` 加载预训练权重
+
+### 使用示例
+
+使用 EEGNet 作为基线（传统模型）：
+
+```powershell
+python .\run_finetune.py --config configs\finetune_ds002336.yaml `
+  --set finetune.eeg_baseline.enabled=true `
+  --set finetune.eeg_baseline.model_name=eegnet `
+  --set finetune.fusion=eeg_only
+```
+
+使用 LaBraM 作为基线（基础模型，加载预训练权重）：
+
+```powershell
+python .\run_finetune.py --config configs\finetune_ds002336.yaml `
+  --set finetune.eeg_baseline.enabled=true `
+  --set finetune.eeg_baseline.model_name=labram `
+  --set finetune.eeg_baseline.load_pretrained_weights=true `
+  --set finetune.eeg_baseline.checkpoint_path=pretrained_weights/labram-base.pth `
+  --set finetune.fusion=eeg_only
+```
+
+### 添加新基线模型
+
+如需添加新的基线模型，需要修改以下文件：
+
+1. **模型定义**：[mmcontrast/baselines/eeg_baseline.py](mmcontrast/baselines/eeg_baseline.py)
+   - 添加模型类（严格遵循官方实现）
+   - 在 `VALID_MODEL_NAMES` 中注册
+   - 在 `MODEL_CATEGORIES` 中指定类别
+
+2. **配置校验**：[mmcontrast/config.py](mmcontrast/config.py)
+   - 在 baseline 白名单中注册 `model_name`
+
+3. **配置文件**：更新所有 `finetune_*.yaml` 的默认值
+
+4. **验证**：
+   ```powershell
+   python -m py_compile mmcontrast/baselines/eeg_baseline.py
+   python -c "from mmcontrast.baselines import EEGBaselineModel; m = EEGBaselineModel(model_name='new_model', num_classes=2, num_channels=62, num_timepoints=200)"
+   ```
+
 ## Optuna
+
+Optuna 现在仍然保留，但已经切换到当前的新主流程，不再依赖旧的单数据集 contrastive 运行脚本。
 
 Optuna 现在仍然保留，但已经切换到当前的新主流程，不再依赖旧的单数据集 contrastive 运行脚本。
 

@@ -317,16 +317,8 @@ class TrainConfig:
                 if category not in {"traditional", "foundation"}:
                     raise ValueError("finetune.eeg_baseline.category must be one of: traditional, foundation")
                 valid_models = {
-                    "traditional": {"conv1d", "cnn", "shallowconv1d", "lstm", "bilstm"},
-                    "foundation": {
-                        "cbramod",
-                        "patch_mlp",
-                        "mlp",
-                        "labram",
-                        "labram_base_patch200_200",
-                        "labram_large_patch200_200",
-                        "labram_huge_patch200_200",
-                    },
+                        "traditional": {"svm", "eeg_deformer", "eegnet", "conformer", "tsception"},
+                        "foundation": {"labram", "cbramod"},
                 }
                 if model_name not in valid_models[category]:
                     raise ValueError(

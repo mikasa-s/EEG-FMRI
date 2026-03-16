@@ -12,6 +12,20 @@ from .multimodal_model import EEGfMRIContrastiveModel
 
 class EEGfMRIClassifier(nn.Module):
     def __init__(self, cfg: dict):
+        """初始化分类器。
+        
+        Args:
+            cfg: 配置字典，包含 finetune, eeg_model, fmri_model, data 等配置
+        
+        基线模型配置示例：
+            finetune:
+                eeg_baseline:
+                    enabled: true
+                    model_name: "eegnet"  # 7 个选项：svm, labram, cbramod, eeg_deformer, eegnet, conformer, tsception
+                    num_classes: 2
+                    num_channels: 62
+                    num_timepoints: 200
+        """
         super().__init__()
         finetune_cfg = cfg["finetune"]
         eeg_cfg = cfg["eeg_model"]
@@ -30,20 +44,40 @@ class EEGfMRIClassifier(nn.Module):
         checkpoint_path = str(finetune_cfg.get("contrastive_checkpoint_path", "")).strip()
 
         if self.use_eeg_baseline:
-            self.eeg_encoder = EEGBaselineModel(data_cfg=data_cfg, eeg_cfg=eeg_cfg, finetune_cfg=finetune_cfg)
-            self.baseline_outputs_logits = bool(self.eeg_encoder.produces_logits)
+            # 从配置中获取基线模型参数
+            model_name = str(baseline_cfg.get("model_name", "eegnet"))
+            num_classes = int(baseline_cfg.get("num_classes", 2))
+            num_channels = int(baseline_cfg.get("num_channels", 62))
+            num_timepoints = int(baseline_cfg.get("num_timepoints", 200))
+            
+            # 创建基线模型
+            self.eeg_encoder = EEGBaselineModel(
+                model_name=model_name,
+                num_classes=num_classes,
+                num_channels=num_channels,
+                num_timepoints=num_timepoints,
+                **baseline_cfg
+            )
+            
+            # 根据模型类别判断是否输出 logits
+            # 基础模型（foundation）：需要额外分类头，不直接输出 logits
+            # 传统模型（traditional）：端到端分类，直接输出 logits
+            self.baseline_outputs_logits = self.eeg_encoder.is_traditional_model()
+            
             if self.baseline_outputs_logits and self.fusion != "eeg_only":
                 raise ValueError("Traditional EEG baselines with built-in classifier only support finetune.fusion=eeg_only")
             if (not self.baseline_outputs_logits) and self.fusion != "eeg_only":
                 self.fmri_encoder = FMRINeuroSTORMAdapter(**fmri_cfg)
 
-            summary_parts = [self.eeg_encoder.initialization_summary]
+            # 生成初始化摘要
+            category = "foundation" if self.eeg_encoder.is_foundation_model() else "traditional"
+            summary_parts = [f"EEG baseline: {model_name} (category={category})."]
             if self.fmri_encoder is not None:
                 if fmri_checkpoint_path:
                     summary_parts.append(f"fMRI encoder checkpoint={fmri_checkpoint_path}.")
                 else:
                     summary_parts.append("fMRI encoder initialized without checkpoint.")
-            elif checkpoint_path and self.eeg_encoder.category == "traditional":
+            elif checkpoint_path and category == "traditional":
                 summary_parts.append("Traditional EEG baseline ignores contrastive checkpoint weights.")
             self.initialization_summary = " ".join(summary_parts)
         else:

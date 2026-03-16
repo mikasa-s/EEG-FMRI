@@ -77,4 +77,3 @@ class FMRINeuroSTORMAdapter(nn.Module):
         return feats.mean(dim=(2, 3, 4, 5))
 
 
-FMRIBrainJEPAAdapter = FMRINeuroSTORMAdapter

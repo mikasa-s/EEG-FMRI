@@ -119,6 +119,16 @@ function Test-TargetCacheReady {
     return $true
 }
 
+function Test-ConfigUsesEegBaseline {
+    param([Parameter(Mandatory = $true)][string]$ConfigPath)
+
+    $config = Get-Content -Path $ConfigPath -Raw | ConvertFrom-Yaml
+    if ($null -eq $config -or $null -eq $config.finetune -or $null -eq $config.finetune.eeg_baseline) {
+        return $false
+    }
+    return [bool]$config.finetune.eeg_baseline.enabled
+}
+
 function Write-FinetuneSummary {
     param(
         [Parameter(Mandatory = $true)][string]$FinetuneRoot,
@@ -378,10 +388,12 @@ if ($foldDirs.Count -eq 0) {
 $finetuneRoot = Join-Path $targetOutputRoot "finetune"
 New-Item -ItemType Directory -Force -Path $finetuneRoot | Out-Null
 
-if ($jointCheckpointSourcePath) {
+$baselineEnabled = Test-ConfigUsesEegBaseline -ConfigPath $targetFinetuneConfig
+
+if ($jointCheckpointSourcePath -and -not $baselineEnabled) {
     Write-Host ("Using pretrain best checkpoint for finetune from: " + $jointCheckpointSourcePath)
 }
-else {
+elseif (-not $baselineEnabled) {
     Write-Host ("Pretrain checkpoint not found at expected paths: " + $jointCheckpointPath + " or " + $jointTrainingCheckpointPath + "; finetune will run without contrastive checkpoint unless you pass --contrastive-checkpoint manually.")
 }
 
@@ -411,7 +423,7 @@ foreach ($foldDir in $foldDirs) {
         "--root-dir", $targetCacheRoot,
         "--output-dir", $foldOutputDir
     )
-    if ($jointCheckpointSourcePath) {
+    if ($jointCheckpointSourcePath -and -not $baselineEnabled) {
         $finetuneArgs += @("--contrastive-checkpoint", $jointCheckpointSourcePath)
     }
     if ($TestOnly) {

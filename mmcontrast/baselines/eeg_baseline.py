@@ -8,6 +8,7 @@
 # - 传统模型（Traditional Models）：SVM, EEG-Deformer, EEGNet, Conformer, TSception（端到端分类模型）
 
 from __future__ import annotations
+import inspect
 from typing import Any, Dict, List, Optional, Tuple
 import math
 import torch
@@ -121,7 +122,12 @@ class SVMClassifier:
         if not _HAS_SKLEARN:
             raise ImportError("scikit-learn is required for SVM. Install with: pip install scikit-learn")
         self.num_classes = num_classes
-        self.clf = SVC(kernel='rbf', probability=True, **kwargs)
+        valid_svc_kwargs = {
+            key: value
+            for key, value in kwargs.items()
+            if key in inspect.signature(SVC.__init__).parameters
+        }
+        self.clf = SVC(kernel='rbf', probability=True, **valid_svc_kwargs)
         self.scaler = StandardScaler()
         self.is_fitted = False
 
@@ -769,6 +775,7 @@ class EEGBaselineModel(nn.Module):
         self.num_classes = num_classes
         self.num_channels = num_channels
         self.num_timepoints = num_timepoints
+        self.model_kwargs = dict(kwargs)
         
         self.model = self._create_model(model_name, num_classes, num_channels, num_timepoints, **kwargs)
         self.feature_dim = int(getattr(self.model, "feature_dim", num_classes))
@@ -791,15 +798,47 @@ class EEGBaselineModel(nn.Module):
         elif model_name_lower == "eeg_deformer":
             return Deformer(num_classes=num_classes, num_chan=num_channels, num_time=num_timepoints, **kwargs)
         elif model_name_lower == "eegnet":
-            return EEGNet(num_classes=num_classes, num_channels=num_channels, num_timepoints=num_timepoints, **kwargs)
+            return EEGNet(num_classes=num_classes, nChan=num_channels, nTime=num_timepoints, **kwargs)
         elif model_name_lower == "conformer":
-            return Conformer(num_classes=num_classes, num_channels=num_channels, num_timepoints=num_timepoints, **kwargs)
+            return Conformer(num_classes=num_classes, num_timepoints=num_timepoints, **kwargs)
         elif model_name_lower == "tsception":
             return TSception(num_classes=num_classes, input_size=[1, num_channels, num_timepoints], **kwargs)
         else:
             raise ValueError(f"Unknown model name: {model_name}")
 
+    @staticmethod
+    def _infer_input_shape(x: torch.Tensor) -> tuple[int, int]:
+        if x.ndim == 4:
+            _, channels, seq_len, patch_len = x.shape
+            return int(channels), int(seq_len * patch_len)
+        if x.ndim == 3:
+            _, channels, timepoints = x.shape
+            return int(channels), int(timepoints)
+        raise ValueError(f"EEG baseline expects [B,C,T] or [B,C,S,P], got {tuple(x.shape)}")
+
+    def _ensure_model_matches_input(self, x: torch.Tensor) -> None:
+        if not self.is_traditional_model():
+            return
+        if self.model_name.lower() == "svm":
+            return
+        inferred_channels, inferred_timepoints = self._infer_input_shape(x)
+        if inferred_channels == self.num_channels and inferred_timepoints == self.num_timepoints:
+            return
+        self.num_channels = inferred_channels
+        self.num_timepoints = inferred_timepoints
+        self.model = self._create_model(
+            self.model_name,
+            self.num_classes,
+            self.num_channels,
+            self.num_timepoints,
+            **self.model_kwargs,
+        )
+        self.feature_dim = int(getattr(self.model, "feature_dim", self.num_classes))
+        if hasattr(x, "device"):
+            self.model = self.model.to(x.device)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self._ensure_model_matches_input(x)
         return self.model(x)
 
     def is_foundation_model(self) -> bool:

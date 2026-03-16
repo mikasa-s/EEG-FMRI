@@ -109,6 +109,20 @@ invoke_or_throw() {
     fi
 }
 
+config_uses_eeg_baseline() {
+    local config_path="$1"
+    "${PYTHON}" - <<'PY' "${config_path}"
+import sys
+import yaml
+
+config_path = sys.argv[1]
+with open(config_path, "r", encoding="utf-8") as handle:
+    payload = yaml.safe_load(handle) or {}
+enabled = bool((((payload.get("finetune") or {}).get("eeg_baseline") or {}).get("enabled", False)))
+print("true" if enabled else "false")
+PY
+}
+
 test_joint_cache_ready() {
     local cache_root="$1"
     [[ -f "${cache_root}/manifest_all.csv" ]]
@@ -400,9 +414,11 @@ fi
 finetune_root="${target_output_root}/finetune"
 mkdir -p "${finetune_root}"
 
-if [[ -n "${joint_checkpoint_source_path}" ]]; then
+baseline_enabled="$(config_uses_eeg_baseline "${target_finetune_config}")"
+
+if [[ -n "${joint_checkpoint_source_path}" && "${baseline_enabled}" != "true" ]]; then
     echo "Using pretrain best checkpoint for finetune from: ${joint_checkpoint_source_path}"
-else
+elif [[ "${baseline_enabled}" != "true" ]]; then
     echo "Pretrain checkpoint not found at expected paths: ${joint_checkpoint_path} or ${joint_training_checkpoint_path}; finetune will run without contrastive checkpoint unless you pass --contrastive-checkpoint manually."
 fi
 
@@ -428,7 +444,7 @@ for fold_dir in "${fold_dirs[@]}"; do
         "--root-dir" "${target_cache_root}"
         "--output-dir" "${fold_output_dir}"
     )
-    if [[ -n "${joint_checkpoint_source_path}" ]]; then
+    if [[ -n "${joint_checkpoint_source_path}" && "${baseline_enabled}" != "true" ]]; then
         finetune_args+=("--contrastive-checkpoint" "${joint_checkpoint_source_path}")
     fi
     if [[ "${TEST_ONLY}" == "true" ]]; then

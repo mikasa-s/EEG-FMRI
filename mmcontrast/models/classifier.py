@@ -82,6 +82,15 @@ class EEGfMRIClassifier(nn.Module):
             # 生成初始化摘要
             category = "foundation" if self.eeg_encoder.is_foundation_model() else "traditional"
             summary_parts = [f"EEG baseline: {model_name} (category={category})."]
+            baseline_checkpoint_path = str(baseline_cfg.get("checkpoint_path", "")).strip()
+            baseline_load_pretrained = bool(baseline_cfg.get("load_pretrained_weights", True))
+            if category == "foundation":
+                if baseline_load_pretrained and baseline_checkpoint_path:
+                    summary_parts.append(f"Baseline pretrained checkpoint={baseline_checkpoint_path}.")
+                elif baseline_load_pretrained:
+                    summary_parts.append("Baseline pretrained loading enabled, but no checkpoint path was provided.")
+                else:
+                    summary_parts.append("Baseline pretrained loading disabled.")
             if self.fmri_encoder is not None:
                 if fmri_checkpoint_path:
                     summary_parts.append(f"fMRI encoder checkpoint={fmri_checkpoint_path}.")

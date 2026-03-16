@@ -73,6 +73,15 @@ class FinetuneTrainer:
             "fmri_model": dict(cfg["fmri_model"]),
             "finetune": dict(finetune_cfg),
         }
+        eeg_input_shape = self.get_dataset_eeg_shape(train_dataset)
+        baseline_cfg_runtime = dict(model_cfg["finetune"].get("eeg_baseline", {}) or {})
+        if bool(baseline_cfg_runtime.get("enabled", False)) and eeg_input_shape is not None:
+            baseline_cfg_runtime["num_channels"] = int(eeg_input_shape[0])
+            if len(eeg_input_shape) >= 3:
+                baseline_cfg_runtime["num_timepoints"] = int(eeg_input_shape[-2] * eeg_input_shape[-1])
+            elif len(eeg_input_shape) >= 2:
+                baseline_cfg_runtime["num_timepoints"] = int(eeg_input_shape[-1])
+            model_cfg["finetune"]["eeg_baseline"] = baseline_cfg_runtime
 
         eeg_ckpt = str(model_cfg["eeg_model"].get("checkpoint_path", "")).strip()
         fmri_ckpt = str(model_cfg["fmri_model"].get("checkpoint_path", "")).strip()
@@ -86,6 +95,7 @@ class FinetuneTrainer:
             baseline_cfg["checkpoint_path"] = str(self.resolve_path(baseline_ckpt))
             model_cfg["finetune"]["eeg_baseline"] = baseline_cfg
 
+        self.uses_svm_baseline = bool(baseline_cfg.get("enabled", False)) and str(baseline_cfg.get("model_name", "")).strip().lower() == "svm"
         self.model = EEGfMRIClassifier(model_cfg).to(self.device)
         if is_main_process():
             total_params, trainable_params = self.count_parameters(self.model)
@@ -106,7 +116,7 @@ class FinetuneTrainer:
             #     frozen_total = sum(item[1] for item in frozen_params)
             #     frozen_desc = "; ".join([f"{name} ({count})" for name, count in frozen_params])
             #     print(f"Non-trainable params: total={frozen_total:,}; {frozen_desc}")
-        if is_dist_initialized():
+        if is_dist_initialized() and not self.uses_svm_baseline:
             # 只有真正进入分布式模式时才包装 DDP。
             self.model = DDP(
                 self.model,
@@ -116,20 +126,23 @@ class FinetuneTrainer:
             )
 
         self.criterion = torch.nn.CrossEntropyLoss()
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=float(finetune_cfg.get("lr", 1e-4)),
-            weight_decay=float(finetune_cfg.get("weight_decay", 1e-4)),
-        )
+        self.optimizer = None
         self.epochs = int(finetune_cfg.get("epochs", 10))
         self.eval_interval = int(finetune_cfg.get("eval_interval", 1))
         self.log_interval = int(finetune_cfg.get("log_interval", 20))
-        total_steps = max(1, self.epochs * len(self.train_loader))
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer,
-            T_max=total_steps,
-            eta_min=float(finetune_cfg.get("min_lr", 1e-6)),
-        )
+        self.scheduler = None
+        if not self.uses_svm_baseline:
+            self.optimizer = torch.optim.AdamW(
+                self.model.parameters(),
+                lr=float(finetune_cfg.get("lr", 1e-4)),
+                weight_decay=float(finetune_cfg.get("weight_decay", 1e-4)),
+            )
+            total_steps = max(1, self.epochs * len(self.train_loader))
+            self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer,
+                T_max=total_steps,
+                eta_min=float(finetune_cfg.get("min_lr", 1e-6)),
+            )
 
         self.grad_clip = float(finetune_cfg.get("grad_clip", 0.0))
         self.early_stop_patience = int(finetune_cfg.get("early_stop_patience", 0))
@@ -174,6 +187,22 @@ class FinetuneTrainer:
             return "None"
         eeg_shape = list(eeg.shape) if hasattr(eeg, "shape") else []
         return str([sample_count, *eeg_shape])
+
+    @staticmethod
+    def get_dataset_eeg_shape(dataset) -> tuple[int, ...] | None:
+        if len(dataset) == 0:
+            return None
+        sample = dataset[0]
+        eeg = sample.get("eeg") if isinstance(sample, dict) else None
+        if eeg is None or not hasattr(eeg, "shape"):
+            return None
+        return tuple(int(dim) for dim in eeg.shape)
+
+    @staticmethod
+    def flatten_eeg_features(eeg: torch.Tensor) -> torch.Tensor:
+        if eeg.ndim <= 2:
+            return eeg
+        return eeg.reshape(eeg.shape[0], -1)
 
     def resolve_path(self, path_str: str) -> Path:
         """把相对路径统一转成基于项目根目录的绝对路径。"""
@@ -248,6 +277,43 @@ class FinetuneTrainer:
             return
         with open(self.output_dir / name, "w", encoding="utf-8") as handle:
             json.dump(metrics, handle, ensure_ascii=False, indent=2)
+
+    def fit_svm_baseline(self) -> None:
+        if hasattr(self.model, "module"):
+            raise RuntimeError("SVM baseline does not support DDP execution.")
+        if self.val_loader is None:
+            raise ValueError("SVM baseline requires validation data for evaluation.")
+
+        train_features = []
+        train_labels = []
+        for batch in self.train_loader:
+            train_features.append(self.flatten_eeg_features(batch["eeg"].cpu()))
+            train_labels.append(batch["label"].cpu())
+        train_x = torch.cat(train_features, dim=0)
+        train_y = torch.cat(train_labels, dim=0)
+        self.model.eeg_encoder.fit(train_x, train_y)
+
+        val_metrics = self.evaluate(self.val_loader, split_name="val")
+        final_metrics = {
+            "epochs": 1,
+            "completed_epochs": 1,
+            "best_epoch": 1,
+            "best_score": float(val_metrics[self.selection_metric]) if val_metrics is not None else float("nan"),
+            "selection_metric": self.selection_metric,
+            "last_train_loss": float("nan"),
+            "early_stop_patience": self.early_stop_patience,
+            "early_stop_min_delta": self.early_stop_min_delta,
+            "early_stopped": False,
+            "svm_baseline": True,
+        }
+        if val_metrics is not None:
+            final_metrics["last_val_metrics"] = val_metrics
+        if self.test_loader is not None:
+            test_metrics = self.evaluate(self.test_loader, split_name="test", save_logits=False)
+            if test_metrics is not None:
+                final_metrics["test_metrics"] = test_metrics
+        self.save_metrics("final_metrics.json", final_metrics)
+        cleanup_distributed()
 
     def load_checkpoint(self, checkpoint_path: Path) -> None:
         """恢复最佳模型权重，用于最终测试集评估。"""
@@ -386,6 +452,22 @@ class FinetuneTrainer:
         logits_all = []
         labels_all = []
 
+        if self.uses_svm_baseline:
+            for batch in loader:
+                eeg = self.flatten_eeg_features(batch["eeg"].cpu())
+                labels = batch["label"].to(self.device, non_blocking=True)
+                probs = self.model.eeg_encoder.predict_proba(eeg).to(self.device)
+                logits = torch.log(probs.clamp_min(1e-8))
+                logits_all.append(gather_tensor(logits.detach()))
+                labels_all.append(gather_tensor(labels.detach()))
+            logits = torch.cat(logits_all, dim=0)
+            labels = torch.cat(labels_all, dim=0)
+            metrics = classification_metrics(logits, labels)
+            metrics["loss"] = float("nan")
+            if save_logits:
+                self.save_logits_artifacts(split_name=split_name, logits=logits, labels=labels)
+            return metrics
+
         for batch in loader:
             eeg = batch["eeg"].to(self.device, non_blocking=True) if "eeg" in batch else None
             fmri = batch["fmri"].to(self.device, non_blocking=True) if "fmri" in batch else None
@@ -427,6 +509,9 @@ class FinetuneTrainer:
 
     def fit(self) -> None:
         """执行完整微调流程，使用验证集指标选择最佳模型，并只对最佳模型做测试。"""
+        if self.uses_svm_baseline:
+            self.fit_svm_baseline()
+            return
         fold_start_time = time.perf_counter()
         best = -1.0
         best_epoch = 0

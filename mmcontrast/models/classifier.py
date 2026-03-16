@@ -56,6 +56,9 @@ class EEGfMRIClassifier(nn.Module):
                 for key, value in baseline_cfg.items()
                 if key not in {"enabled", "category", "load_pretrained_weights", "model_name", "num_classes", "num_channels", "num_timepoints"}
             }
+            if str(model_name).strip().lower() not in {"labram", "cbramod"}:
+                baseline_init_kwargs.pop("checkpoint_path", None)
+                baseline_init_kwargs.pop("freeze_backbone", None)
             
             # 创建基线模型
             self.eeg_encoder = EEGBaselineModel(

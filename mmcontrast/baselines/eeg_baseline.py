@@ -126,6 +126,8 @@ class SVMClassifier:
         self.is_fitted = False
 
     def fit(self, X: torch.Tensor, y: torch.Tensor) -> None:
+        if X.ndim > 2:
+            X = X.reshape(X.shape[0], -1)
         X_np = X.cpu().numpy()
         y_np = y.cpu().numpy()
         X_scaled = self.scaler.fit_transform(X_np)
@@ -135,6 +137,8 @@ class SVMClassifier:
     def predict(self, X: torch.Tensor) -> torch.Tensor:
         if not self.is_fitted:
             raise RuntimeError("SVM must be fitted before prediction")
+        if X.ndim > 2:
+            X = X.reshape(X.shape[0], -1)
         X_np = X.cpu().numpy()
         X_scaled = self.scaler.transform(X_np)
         preds = self.clf.predict(X_scaled)
@@ -143,9 +147,11 @@ class SVMClassifier:
     def predict_proba(self, X: torch.Tensor) -> torch.Tensor:
         if not self.is_fitted:
             raise RuntimeError("SVM must be fitted before prediction")
+        if X.ndim > 2:
+            X = X.reshape(X.shape[0], -1)
         X_np = X.cpu().numpy()
         X_scaled = self.scaler.transform(X_np)
-        probs = self.clf.predict_proba(X_np)
+        probs = self.clf.predict_proba(X_scaled)
         return torch.tensor(probs, dtype=torch.float32, device=X.device)
 
 

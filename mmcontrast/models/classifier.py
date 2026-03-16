@@ -49,6 +49,13 @@ class EEGfMRIClassifier(nn.Module):
             num_classes = int(baseline_cfg.get("num_classes", 2))
             num_channels = int(baseline_cfg.get("num_channels", 62))
             num_timepoints = int(baseline_cfg.get("num_timepoints", 200))
+            if not bool(baseline_cfg.get("load_pretrained_weights", True)):
+                baseline_cfg["checkpoint_path"] = ""
+            baseline_init_kwargs = {
+                key: value
+                for key, value in baseline_cfg.items()
+                if key not in {"enabled", "category", "load_pretrained_weights", "model_name", "num_classes", "num_channels", "num_timepoints"}
+            }
             
             # 创建基线模型
             self.eeg_encoder = EEGBaselineModel(
@@ -56,7 +63,7 @@ class EEGfMRIClassifier(nn.Module):
                 num_classes=num_classes,
                 num_channels=num_channels,
                 num_timepoints=num_timepoints,
-                **baseline_cfg
+                **baseline_init_kwargs
             )
             
             # 根据模型类别判断是否输出 logits
@@ -84,7 +91,7 @@ class EEGfMRIClassifier(nn.Module):
             # 复用对比学习阶段的双塔骨干作为下游特征提取器。
             self.backbone = EEGfMRIContrastiveModel(cfg)
             if checkpoint_path:
-                torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+                checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
                 state = checkpoint.get("model", checkpoint)
                 current_state = self.backbone.state_dict()
                 compatible_state = {}

@@ -614,62 +614,59 @@ class EEGLaBraMAdapter(nn.Module):
     
     def __init__(
         self,
-        num_classes: int = 2,
-        num_channels: int = 62,
-        num_timepoints: int = 200,
-        embed_dim: int = 768,
-        num_heads: int = 12,
-        num_layers: int = 12,
-        **kwargs: Any,
+        model_name: str = "labram_base_patch200_200",
+        checkpoint_path: str = "",
+        freeze_backbone: bool = False,
+        **_: Any,
     ):
         super().__init__()
-        self.num_channels = num_channels
-        self.num_timepoints = num_timepoints
-        
-        self.patch_embed = nn.Conv1d(num_channels, embed_dim, kernel_size=50, stride=50)
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, 1 + num_timepoints // 50, embed_dim))
-        
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dim,
-            nhead=num_heads,
-            dim_feedforward=embed_dim * 4,
-            dropout=0.1,
-            activation='gelu',
-            batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        
-        self.norm = nn.LayerNorm(embed_dim)
-        self.classifier = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(embed_dim // 2, num_classes)
-        )
-        
-        nn.init.trunc_normal_(self.cls_token, std=0.02)
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        try:
+            from ..backbones.eeg_labram.modeling_finetune import (
+                labram_base_patch200_200,
+                labram_huge_patch200_200,
+                labram_large_patch200_200,
+            )
+            from ..checkpoint_utils import load_compatible_state_dict
+        except ModuleNotFoundError as exc:
+            if exc.name == "timm":
+                raise ModuleNotFoundError("LaBraM baseline requires the 'timm' package. Please install timm>=0.9.16.") from exc
+            raise
+
+        labram_factory = {
+            "labram_base_patch200_200": labram_base_patch200_200,
+            "labram_large_patch200_200": labram_large_patch200_200,
+            "labram_huge_patch200_200": labram_huge_patch200_200,
+        }
+        if model_name not in labram_factory:
+            raise ValueError(f"Unsupported LaBraM model_name: {model_name}")
+
+        self.backbone = labram_factory[model_name](pretrained=False, num_classes=0)
+        self.feature_dim = int(getattr(self.backbone, "num_features", 200))
+
+        if checkpoint_path:
+            load_compatible_state_dict(
+                self.backbone,
+                checkpoint_path,
+                preferred_keys=("model", "module", "state_dict"),
+                prefixes=("module.", "model."),
+            )
+
+        if freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.ndim == 4:
-            B, C, S, P = x.shape
-            x = x.reshape(B, C, S * P)
-        
-        if x.ndim != 3:
-            raise ValueError(f"LaBraM expects [B,C,T] or [B,C,S,P], got {tuple(x.shape)}")
-        
-        B = x.shape[0]
-        x = self.patch_embed(x)
-        x = x.transpose(1, 2)
-        
-        cls_tokens = self.cls_token.expand(B, -1, -1)
-        x = torch.cat((cls_tokens, x), dim=1)
-        x = x + self.pos_embed
-        
-        x = self.transformer(x)
-        x = self.norm(x[:, 0])
-        return self.classifier(x)
+        if x.ndim != 4:
+            raise ValueError(f"LaBraM baseline expects EEG [B,C,S,P], got {tuple(x.shape)}")
+        if x.shape[1] != 62:
+            raise ValueError(
+                f"LaBraM baseline currently requires 62 EEG channels, but got {int(x.shape[1])}. "
+                "Please remap/select channels to 62 before finetune."
+            )
+        features = self.backbone.forward_features(x)
+        if features.ndim != 2:
+            raise RuntimeError(f"Unexpected LaBraM feature shape: {tuple(features.shape)}")
+        return features
 
 
 class EEGCBraModAdapter(nn.Module):
@@ -683,63 +680,47 @@ class EEGCBraModAdapter(nn.Module):
     
     def __init__(
         self,
-        num_classes: int = 2,
-        num_channels: int = 62,
-        num_timepoints: int = 200,
-        embed_dim: int = 512,
-        num_heads: int = 8,
-        num_layers: int = 8,
-        **kwargs: Any,
+        checkpoint_path: str = "",
+        in_dim: int = 200,
+        out_dim: int = 200,
+        d_model: int = 200,
+        dim_feedforward: int = 800,
+        seq_len: int = 30,
+        n_layer: int = 12,
+        nhead: int = 8,
+        freeze_backbone: bool = False,
+        **_: Any,
     ):
         super().__init__()
-        self.num_channels = num_channels
-        self.num_timepoints = num_timepoints
-        
-        self.patch_embed = nn.Conv1d(num_channels, embed_dim, kernel_size=100, stride=100)
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        num_patches = num_timepoints // 100
-        self.pos_embed = nn.Parameter(torch.zeros(1, 1 + num_patches, embed_dim))
-        
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dim,
-            nhead=num_heads,
-            dim_feedforward=embed_dim * 4,
-            dropout=0.1,
-            activation='gelu',
-            batch_first=True
+        from ..backbones.eeg_cbramod import CBraMod
+        from ..checkpoint_utils import load_compatible_state_dict
+
+        self.backbone = CBraMod(
+            in_dim=in_dim,
+            out_dim=out_dim,
+            d_model=d_model,
+            dim_feedforward=dim_feedforward,
+            seq_len=seq_len,
+            n_layer=n_layer,
+            nhead=nhead,
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        
-        self.norm = nn.LayerNorm(embed_dim)
-        self.classifier = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(embed_dim // 2, num_classes)
-        )
-        
-        nn.init.trunc_normal_(self.cls_token, std=0.02)
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        self.feature_dim = out_dim
+
+        if checkpoint_path:
+            load_compatible_state_dict(
+                self.backbone,
+                checkpoint_path,
+                preferred_keys=("state_dict", "model"),
+                prefixes=("module.",),
+            )
+
+        if freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.ndim == 4:
-            B, C, S, P = x.shape
-            x = x.reshape(B, C, S * P)
-        
-        if x.ndim != 3:
-            raise ValueError(f"CBraMod expects [B,C,T] or [B,C,S,P], got {tuple(x.shape)}")
-        
-        B = x.shape[0]
-        x = self.patch_embed(x)
-        x = x.transpose(1, 2)
-        
-        cls_tokens = self.cls_token.expand(B, -1, -1)
-        x = torch.cat((cls_tokens, x), dim=1)
-        x = x + self.pos_embed
-        
-        x = self.transformer(x)
-        x = self.norm(x[:, 0])
-        return self.classifier(x)
+        feats = self.backbone(x)
+        return feats.mean(dim=(1, 2))
 
 
 # ============================================================================
@@ -782,6 +763,7 @@ class EEGBaselineModel(nn.Module):
         self.num_timepoints = num_timepoints
         
         self.model = self._create_model(model_name, num_classes, num_channels, num_timepoints, **kwargs)
+        self.feature_dim = int(getattr(self.model, "feature_dim", num_classes))
 
     def _create_model(
         self,
@@ -795,9 +777,9 @@ class EEGBaselineModel(nn.Module):
         if model_name_lower == "svm":
             return SVMClassifier(num_classes=num_classes, **kwargs)
         elif model_name_lower == "labram":
-            return EEGLaBraMAdapter(num_classes=num_classes, num_channels=num_channels, num_timepoints=num_timepoints, **kwargs)
+            return EEGLaBraMAdapter(**kwargs)
         elif model_name_lower == "cbramod":
-            return EEGCBraModAdapter(num_classes=num_classes, num_channels=num_channels, num_timepoints=num_timepoints, **kwargs)
+            return EEGCBraModAdapter(**kwargs)
         elif model_name_lower == "eeg_deformer":
             return Deformer(num_classes=num_classes, num_chan=num_channels, num_time=num_timepoints, **kwargs)
         elif model_name_lower == "eegnet":

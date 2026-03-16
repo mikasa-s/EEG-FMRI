@@ -77,9 +77,14 @@ class FinetuneTrainer:
         eeg_ckpt = str(model_cfg["eeg_model"].get("checkpoint_path", "")).strip()
         fmri_ckpt = str(model_cfg["fmri_model"].get("checkpoint_path", "")).strip()
         contrastive_ckpt = str(model_cfg["finetune"].get("contrastive_checkpoint_path", "")).strip()
+        baseline_cfg = dict(model_cfg["finetune"].get("eeg_baseline", {}) or {})
+        baseline_ckpt = str(baseline_cfg.get("checkpoint_path", "")).strip()
         model_cfg["eeg_model"]["checkpoint_path"] = str(self.resolve_path(eeg_ckpt)) if eeg_ckpt else ""
         model_cfg["fmri_model"]["checkpoint_path"] = str(self.resolve_path(fmri_ckpt)) if fmri_ckpt else ""
         model_cfg["finetune"]["contrastive_checkpoint_path"] = str(self.resolve_path(contrastive_ckpt)) if contrastive_ckpt else ""
+        if baseline_ckpt:
+            baseline_cfg["checkpoint_path"] = str(self.resolve_path(baseline_ckpt))
+            model_cfg["finetune"]["eeg_baseline"] = baseline_cfg
 
         self.model = EEGfMRIClassifier(model_cfg).to(self.device)
         if is_main_process():

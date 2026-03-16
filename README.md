@@ -385,7 +385,7 @@ python .\run_train.py --config configs\train_joint_contrastive.yaml `
 
 - `model_name: labram`
 - `labram_model_name: labram_base_patch200_200`（可改 large/huge）
-- `labram_checkpoint_path: pretrained_weights/labram-base.pth`
+- `checkpoint_path: pretrained_weights/labram-base.pth`
 
 注意：当前 LaBraM baseline 需要输入 EEG 通道数为 62。
 
@@ -425,7 +425,7 @@ python .\run_train.py --config configs\train_joint_contrastive.yaml `
 - 默认主流程 [scripts/run_pretrain_and_finetune.ps1](scripts/run_pretrain_and_finetune.ps1) 会把联合预训练 best checkpoint 同步到 `pretrained_weights/contrastive_best.pth`，并在微调时自动传给 `--contrastive-checkpoint`。
 - 禁用“加载对比学习权重”：把 `finetune.contrastive_checkpoint_path` 置空（或不要传 `--contrastive-checkpoint`）。
 - 使用 EEG baseline 且禁用其预训练加载：设置 `finetune.eeg_baseline.load_pretrained_weights: false`。
-- 使用 LaBraM baseline：设置 `model_name: labram`，并将 `labram_checkpoint_path` 指向 `pretrained_weights/labram-base.pth`。
+- 使用 LaBraM baseline：设置 `model_name: labram`，并将 `checkpoint_path` 指向 `pretrained_weights/labram-base.pth`。
 
 ## EEG Baseline 模型
 

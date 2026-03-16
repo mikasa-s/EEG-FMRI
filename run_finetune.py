@@ -111,7 +111,7 @@ def apply_overrides(config: dict, args: argparse.Namespace) -> dict:
             parse_bool_text(args.eeg_baseline_load_pretrained),
         )
     if args.eeg_baseline_checkpoint.strip():
-        assign_nested_value(config, "finetune.eeg_baseline.labram_checkpoint_path", args.eeg_baseline_checkpoint.strip())
+        assign_nested_value(config, "finetune.eeg_baseline.checkpoint_path", args.eeg_baseline_checkpoint.strip())
 
     if args.force_cpu:
         assign_nested_value(config, "train.force_cpu", True)

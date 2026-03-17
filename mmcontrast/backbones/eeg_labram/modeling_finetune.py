@@ -14,8 +14,8 @@ from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from timm.models.layers import drop_path, to_2tuple, trunc_normal_
-from timm.models.registry import register_model
+from timm.layers import drop_path, to_2tuple, trunc_normal_
+from timm.models import register_model
 from einops import rearrange
 
 
@@ -346,6 +346,29 @@ class NeuralTransformer(nn.Module):
         self.num_classes = num_classes
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
+    def _resize_pos_embed(self, pos_embed, batch_size, num_channels, time_window):
+        cls_pos = pos_embed[:, :1, :].expand(batch_size, -1, -1)
+        channel_pos = pos_embed[:, 1:, :]
+        if channel_pos.shape[1] != num_channels:
+            channel_pos = F.interpolate(
+                channel_pos.transpose(1, 2),
+                size=num_channels,
+                mode="linear",
+                align_corners=False,
+            ).transpose(1, 2)
+        channel_pos = channel_pos.unsqueeze(2).expand(batch_size, -1, time_window, -1).flatten(1, 2)
+        return torch.cat((cls_pos, channel_pos), dim=1)
+
+    def _resize_time_embed(self, time_embed, batch_size, num_channels, time_window):
+        if time_embed.shape[1] != time_window:
+            time_embed = F.interpolate(
+                time_embed.transpose(1, 2),
+                size=time_window,
+                mode="linear",
+                align_corners=False,
+            ).transpose(1, 2)
+        return time_embed.unsqueeze(1).expand(batch_size, num_channels, -1, -1).flatten(1, 2)
+
     def forward_features(self, x, input_chans=None, return_patch_tokens=False, return_all_tokens=False, **kwargs):
         batch_size, n, a, t = x.shape
         input_time_window = a if t == self.patch_size else t
@@ -357,12 +380,12 @@ class NeuralTransformer(nn.Module):
 
         pos_embed_used = self.pos_embed[:, input_chans] if input_chans is not None else self.pos_embed
         if self.pos_embed is not None:
-            pos_embed = pos_embed_used[:, 1:, :].unsqueeze(2).expand(batch_size, -1, input_time_window, -1).flatten(1, 2)
-            pos_embed = torch.cat((pos_embed_used[:,0:1,:].expand(batch_size, -1, -1), pos_embed), dim=1)
+            num_channels = pos_embed_used.shape[1] - 1
+            pos_embed = self._resize_pos_embed(pos_embed_used, batch_size, num_channels, input_time_window)
             x = x + pos_embed
         if self.time_embed is not None:
             nc = n if t == self.patch_size else a
-            time_embed = self.time_embed[:, 0:input_time_window, :].unsqueeze(1).expand(batch_size, nc, -1, -1).flatten(1, 2)
+            time_embed = self._resize_time_embed(self.time_embed, batch_size, nc, input_time_window)
             x[:, 1:, :] += time_embed
 
         x = self.pos_drop(x)
@@ -403,11 +426,12 @@ class NeuralTransformer(nn.Module):
         cls_tokens = self.cls_token.expand(batch_size, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
         x = torch.cat((cls_tokens, x), dim=1)
         if self.pos_embed is not None:
-            pos_embed = self.pos_embed[:, 1:, :].unsqueeze(2).expand(batch_size, -1, self.time_window, -1).flatten(1, 2)
-            pos_embed = torch.cat((self.pos_embed[:,0:1,:].expand(batch_size, -1, -1), pos_embed), dim=1)
+            num_channels = max((x.shape[1] - 1) // max(self.time_window, 1), 1)
+            pos_embed = self._resize_pos_embed(self.pos_embed, batch_size, num_channels, self.time_window)
             x = x + pos_embed
         if self.time_embed is not None:
-            time_embed = self.time_embed.unsqueeze(1).expand(batch_size, 62, -1, -1).flatten(1, 2)
+            num_channels = max((x.shape[1] - 1) // max(self.time_window, 1), 1)
+            time_embed = self._resize_time_embed(self.time_embed, batch_size, num_channels, self.time_window)
             x[:, 1:, :] += time_embed
         x = self.pos_drop(x)
 

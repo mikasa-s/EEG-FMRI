@@ -10,10 +10,7 @@ import torch.nn as nn
 
 from ..checkpoint_utils import load_compatible_state_dict
 
-LABRAM_MAX_CHANNEL_SLOTS = 62
-LABRAM_SHARED_CHANNEL_COUNT = 40
 JOINT_CHANNEL_MANIFEST = Path(__file__).resolve().parents[2] / "cache" / "joint_contrastive" / "eeg_channels_target.csv"
-
 
 def _normalize_channel_name(name: str) -> str:
     return str(name).strip().upper().replace(" ", "")
@@ -33,6 +30,11 @@ def _load_channel_names_from_manifest(manifest_path: str | Path) -> list[str]:
     if not names:
         raise ValueError(f"No target_channel_name entries found in EEG channel manifest: {path}")
     return names
+
+
+def _count_common_channel_matches(current_names: list[str], common_names: list[str]) -> int:
+    current_lookup = {_normalize_channel_name(name) for name in current_names}
+    return sum(1 for name in common_names if _normalize_channel_name(name) in current_lookup)
 
 
 class EEGLaBraMAdapter(nn.Module):
@@ -66,20 +68,18 @@ class EEGLaBraMAdapter(nn.Module):
             raise
 
         self.feature_dim = int(getattr(self.backbone, "num_features", 200))
-        self.expected_num_channels = LABRAM_MAX_CHANNEL_SLOTS
         self.dropped_channel_names: list[str] = []
-        if str(channel_manifest_path).strip():
-            current_names = _load_channel_names_from_manifest(channel_manifest_path)
-            if JOINT_CHANNEL_MANIFEST.exists():
-                joint_names = _load_channel_names_from_manifest(JOINT_CHANNEL_MANIFEST)
-                joint_lookup = {_normalize_channel_name(name) for name in joint_names}
-                leading = [name for name in joint_names if _normalize_channel_name(name) in {_normalize_channel_name(v) for v in current_names}]
-                trailing = [name for name in current_names if _normalize_channel_name(name) not in joint_lookup]
-                reordered_names = leading + trailing
-            else:
-                reordered_names = current_names
-            if len(reordered_names) > self.expected_num_channels:
-                self.dropped_channel_names = reordered_names[self.expected_num_channels:]
+        self.input_channel_names = (
+            _load_channel_names_from_manifest(channel_manifest_path)
+            if str(channel_manifest_path).strip()
+            else []
+        )
+        self.common_channel_match_count: int | None = None
+        self.common_channel_total_count: int | None = None
+        if self.input_channel_names and JOINT_CHANNEL_MANIFEST.exists():
+            common_channel_names = _load_channel_names_from_manifest(JOINT_CHANNEL_MANIFEST)
+            self.common_channel_match_count = _count_common_channel_matches(self.input_channel_names, common_channel_names)
+            self.common_channel_total_count = len(common_channel_names)
 
         if checkpoint_path:
             load_compatible_state_dict(
@@ -93,25 +93,19 @@ class EEGLaBraMAdapter(nn.Module):
             for param in self.backbone.parameters():
                 param.requires_grad = False
 
-    def _prepare_input(self, eeg: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
+    def _resolve_input_chans(self, eeg: torch.Tensor) -> torch.Tensor:
         num_input_channels = int(eeg.shape[1])
-        if num_input_channels > self.expected_num_channels:
-            eeg = eeg[:, : self.expected_num_channels, ...]
-            num_input_channels = self.expected_num_channels
-        preserved_channels = min(num_input_channels, LABRAM_SHARED_CHANNEL_COUNT)
-        extra_channels = max(0, num_input_channels - preserved_channels)
-        input_chans = [0]
-        input_chans.extend(range(1, preserved_channels + 1))
-        if extra_channels > 0:
-            input_chans.extend(range(LABRAM_SHARED_CHANNEL_COUNT + 1, LABRAM_SHARED_CHANNEL_COUNT + extra_channels + 1))
-        if num_input_channels == self.expected_num_channels:
-            return eeg, None
-        return eeg, torch.tensor(input_chans, dtype=torch.long, device=eeg.device)
+        if self.input_channel_names and len(self.input_channel_names) != num_input_channels:
+            raise ValueError(
+                "LaBraM channel manifest does not match current EEG input: "
+                f"manifest has {len(self.input_channel_names)} channels but input has {num_input_channels}."
+            )
+        return torch.arange(num_input_channels + 1, dtype=torch.long, device=eeg.device)
 
     def forward(self, eeg: torch.Tensor) -> torch.Tensor:
         if eeg.ndim != 4:
             raise ValueError(f"LaBraM baseline expects EEG [B,C,S,P], got {tuple(eeg.shape)}")
-        eeg, input_chans = self._prepare_input(eeg)
+        input_chans = self._resolve_input_chans(eeg)
         features = self.backbone.forward_features(eeg, input_chans=input_chans)
         if features.ndim != 2:
             raise RuntimeError(f"Unexpected LaBraM feature shape: {tuple(features.shape)}")

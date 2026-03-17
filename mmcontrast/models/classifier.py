@@ -95,6 +95,12 @@ class EEGfMRIClassifier(nn.Module):
                     summary_parts.append("Baseline pretrained loading enabled, but no checkpoint path was provided.")
                 else:
                     summary_parts.append("Baseline pretrained loading disabled.")
+                mapped_common_channels = getattr(getattr(self.eeg_encoder, "model", None), "common_channel_match_count", None)
+                common_channel_total = getattr(getattr(self.eeg_encoder, "model", None), "common_channel_total_count", None)
+                if mapped_common_channels is not None and common_channel_total is not None:
+                    summary_parts.append(
+                        f"LaBraM common-channel mapping matched {mapped_common_channels}/{common_channel_total} channels."
+                    )
                 dropped_channels = getattr(getattr(self.eeg_encoder, "model", None), "dropped_channel_names", None)
                 if dropped_channels:
                     dropped_text = ", ".join(dropped_channels[:8])

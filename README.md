@@ -1,23 +1,320 @@
 # EEG-fMRI-Contrastive
 
-## Shared-Private EEG-fMRI 补充说明
+一个面向 EEG-fMRI 联合学习的训练仓库，当前支持：
 
-- EEG 频段目标不是从原始 256 Hz 片段直接提取。
-- 正确顺序是：先执行仓库原有 EEG 预处理流程，再从预处理后的 EEG 片段提取频段功率。
-- 当前仓库原有预处理会把 EEG 重采样到 `200 Hz`，因此 band-power 提取必须基于 `200 Hz` 的 8 秒片段。
-- 对应的单段长度应为 `8 x 200 = 1600` 个采样点。
-- 5 个频段固定为：
-  - delta: `0.5-4`
-  - theta: `4-8`
-  - alpha: `8-13`
-  - beta: `13-30`
-  - gamma: `30-40`
-- 这里的 gamma 必须截止到 `40 Hz`，不能高于 `40 Hz`，因为输入 EEG 在原预处理后已经限制到 `0.5-40 Hz`。
-- band-power 目标在预处理阶段离线计算，并保存为 shape `[N, 5]`；预训练阶段直接读取，不做在线频段计算。
+- 联合对比预训练
+- EEG-only 微调分类
+- EEG shared/private 表征拆分
+- 离线 EEG band-power 目标回归
+- Windows PowerShell 和 Linux Bash 两套脚本
+- Optuna 自动搜索
 
-### 频段目标预处理命令
+当前主流程已经调整为：
 
-在 joint cache 已经通过原预处理生成后，再执行：
+1. 先执行原始数据预处理。
+2. 预处理阶段把 EEG 重采样到 `200 Hz`。
+3. 在预处理后的 EEG 段上离线计算 `band_power.npy`。
+4. 预训练阶段直接读取 band-power 目标，不在训练时在线计算。
+5. 微调阶段默认只使用 EEG，分类输入模式支持 `shared`、`private`、`concat`，默认 `concat`。
+
+## 1. 项目概览
+
+### 1.1 预训练目标
+
+当前预训练模型保留原有 EEG encoder 和 fMRI encoder 主体，只在编码器外增加轻量 head：
+
+- EEG shared head
+- EEG private head
+- fMRI shared head
+- EEG private 到 5 维 band-power 的预测 head
+
+预训练损失由三部分组成：
+
+- `InfoNCE(eeg_shared, fmri_shared)`
+- `MSE(band_power_pred, band_power_target)`
+- `separation_loss(eeg_shared, eeg_private)`
+
+对应实现位置：
+
+- `mmcontrast/models/shared_private.py`
+- `mmcontrast/models/multimodal_model.py`
+- `mmcontrast/losses.py`
+
+### 1.2 微调目标
+
+微调阶段默认走 EEG-only 分类，支持三种 EEG 特征模式：
+
+- `shared`
+- `private`
+- `concat`
+
+默认配置是：
+
+```yaml
+finetune:
+  fusion: eeg_only
+  classifier_mode: concat
+```
+
+对应实现位置：
+
+- `mmcontrast/models/classifier.py`
+- `configs/finetune_ds002336.yaml`
+- `configs/finetune_ds002338.yaml`
+- `configs/finetune_ds002739.yaml`
+
+## 2. 支持的数据集
+
+当前仓库内置支持：
+
+- `ds002336`
+- `ds002338`
+- `ds002739`
+
+约定的数据目录通常是仓库同级或上级，例如：
+
+```text
+OpenNeuro/
+  EEG-fMRI-Contrastive/
+  ds002336/
+  ds002338/
+  ds002739/
+```
+
+脚本会自动尝试这些位置：
+
+- `../ds002336`
+- `../ds002338`
+- `../ds002739`
+- `data/ds002336`
+- `data/ds002338`
+- `data/ds002739`
+- `../data/ds002336`
+- `../data/ds002338`
+- `../data/ds002739`
+
+如果你的目录不在这些位置，请显式传 `--ds-root` 或 `--ds002336-root` / `--ds002338-root` / `--ds002739-root`。
+
+## 3. 目录结构
+
+```text
+EEG-fMRI-Contrastive/
+  configs/
+    train_joint_contrastive.yaml
+    finetune_ds002336.yaml
+    finetune_ds002338.yaml
+    finetune_ds002739.yaml
+    optuna_ds002336.yaml
+    optuna_ds002336_linux.yaml
+    optuna_ds002338.yaml
+    optuna_ds002338_linux.yaml
+    optuna_ds002739.yaml
+    optuna_ds002739_linux.yaml
+  preprocess/
+    prepare_joint_contrastive.py
+    prepare_ds00233x.py
+    prepare_ds002739.py
+    compute_eeg_band_power_targets.py
+    run_spm_preproc_ds00233x.m
+  mmcontrast/
+    datasets/
+    models/
+    losses.py
+    contrastive_runner.py
+    contrastive_trainer.py
+    finetune_runner.py
+    finetune_trainer.py
+  scripts/
+    prepare_joint_contrastive.ps1
+    run_pretrain_and_finetune.ps1
+    run_optuna_pretrain_and_finetune.ps1
+    ds00233x/
+      prepare_ds00233x.ps1
+      prepare_ds00233x_spm.ps1
+    ds002739/
+      prepare_ds002739.ps1
+  scripts_linux/
+    prepare_joint_contrastive.sh
+    run_pretrain_and_finetune.sh
+    run_optuna_pretrain_and_finetune.sh
+    ds00233x/
+      prepare_ds00233x.sh
+      prepare_ds00233x_spm.sh
+    ds002739/
+      prepare_ds002739.sh
+  run_train.py
+  run_finetune.py
+  run_optuna_search.py
+  requirements.txt
+  README.md
+```
+
+## 4. 环境准备
+
+### 4.1 Windows
+
+```powershell
+conda activate mamba
+cd D:\OpenNeuro\EEG-fMRI-Contrastive
+python -m pip install -r requirements.txt
+```
+
+如果 PowerShell 阻止脚本执行，可以临时使用：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\prepare_joint_contrastive.ps1
+```
+
+### 4.2 Linux
+
+```bash
+conda activate mamba
+cd /path/to/EEG-fMRI-Contrastive
+python -m pip install -r requirements.txt
+```
+
+如果脚本没有执行权限：
+
+```bash
+chmod +x scripts_linux/*.sh scripts_linux/ds00233x/*.sh scripts_linux/ds002739/*.sh
+```
+
+## 5. 数据预处理总流程
+
+推荐按下面顺序执行：
+
+1. 联合预训练缓存预处理。
+2. 生成离线 band-power 目标。
+3. 单数据集微调缓存预处理。
+4. 运行联合预训练。
+5. 运行单数据集 LOSO 微调。
+
+说明：
+
+- `scripts/prepare_joint_contrastive.ps1` 和 `scripts_linux/prepare_joint_contrastive.sh` 已经自动串上了 band-power 计算。
+- 如果你只单独重算 band-power，可以直接运行 `preprocess/compute_eeg_band_power_targets.py`。
+- 微调缓存预处理不会自动重算 band-power，因为 band-power 只在预训练阶段使用。
+
+## 6. EEG band-power 目标说明
+
+### 6.1 计算时机
+
+band-power 必须在原始 EEG 预处理完成之后再计算，而不是直接对原始 EEG 文件计算。
+
+当前仓库的原始 EEG 预处理会把每个 EEG 段重采样到：
+
+- `200 Hz`
+
+因此 band-power 计算也必须基于 `200 Hz` 的结果。
+
+### 6.2 时间长度
+
+当前默认 EEG 段长度为：
+
+- `8` 秒
+
+所以 band-power 脚本默认期望每段 EEG 的长度是：
+
+- `8 x 200 = 1600`
+
+如果不是这个长度，脚本会报错，提示先完成原始预处理。
+
+### 6.3 频带定义
+
+当前固定为 5 维：
+
+- `delta`: `0.5-4`
+- `theta`: `4-8`
+- `alpha`: `8-13`
+- `beta`: `13-30`
+- `gamma`: `30-40`
+
+注意：
+
+- 原始 EEG 预处理带通范围是 `0.5-40 Hz`
+- 所以 `gamma` 必须是 `30-40 Hz`
+- 不能再写成高于 `40 Hz` 的频段
+
+### 6.4 保存格式
+
+band-power 目标保存为：
+
+- shape `[N, 5]`
+
+对于 subject pack 模式，脚本行为是：
+
+- 读取 `eeg.npy`
+- 计算 `band_power.npy`
+- 只新增或覆盖 `band_power.npy`
+- 最多顺手更新 `metadata.json`
+- 不会删除整个 subject 目录
+- 不会重写 `eeg.npy`、`fmri.npy`、`sample_id.npy` 等其他数组
+
+对应脚本：
+
+- `preprocess/compute_eeg_band_power_targets.py`
+
+## 7. 联合预训练缓存预处理
+
+联合预训练缓存用于跨数据集对比预训练，默认输出到：
+
+- `cache/joint_contrastive`
+
+产物通常包括：
+
+- `manifest_all.csv`
+- `eeg_channels_target.csv`
+- `subjects/<dataset>_<subject>/...`
+- `subjects/<dataset>_<subject>/band_power.npy`
+
+### 7.1 Windows
+
+```powershell
+.\scripts\prepare_joint_contrastive.ps1 `
+  -Ds002336Root ..\ds002336 `
+  -Ds002338Root ..\ds002338 `
+  -Ds002739Root ..\ds002739 `
+  -OutputRoot cache\joint_contrastive `
+  -Datasets ds002336,ds002338,ds002739 `
+  -EegWindowSec 8.0 `
+  -NumWorkers 2
+```
+
+说明：
+
+- 脚本会先调用 `preprocess/prepare_joint_contrastive.py`
+- 然后自动调用 `preprocess/compute_eeg_band_power_targets.py`
+- band-power 计算默认使用 `--sample-rate-hz 200`
+
+### 7.2 Linux
+
+```bash
+./scripts_linux/prepare_joint_contrastive.sh \
+  --ds002336-root ../ds002336 \
+  --ds002338-root ../ds002338 \
+  --ds002739-root ../ds002739 \
+  --output-root cache/joint_contrastive \
+  --datasets ds002336,ds002338,ds002739 \
+  --eeg-window-sec 8.0 \
+  --num-workers 2
+```
+
+### 7.3 单独重算 band-power
+
+如果 joint cache 已经存在，只想补或重算 band-power：
+
+#### Windows
+
+```powershell
+python .\preprocess\compute_eeg_band_power_targets.py `
+  --manifest-csv cache\joint_contrastive\manifest_all.csv `
+  --root-dir cache\joint_contrastive `
+  --sample-rate-hz 200 `
+  --window-sec 8 `
+  --overwrite
+```
+
+#### Linux
 
 ```bash
 python preprocess/compute_eeg_band_power_targets.py \
@@ -28,676 +325,189 @@ python preprocess/compute_eeg_band_power_targets.py \
   --overwrite
 ```
 
-如果直接用仓库自带 joint preprocessing 脚本，它现在会在原预处理完成后，自动继续计算 band-power，并且使用 `200 Hz`。
+## 8. 单数据集微调缓存预处理
 
-当前仓库只保留一条正式工作流：
+单数据集微调缓存默认用于 LOSO 划分和分类训练，通常输出到：
 
-1. 选择一个或多个数据集做 EEG-fMRI 联合对比学习预训练。
-2. 预训练阶段先做时间对齐和通道统一，再把全部预训练样本合并成一个训练集。
-3. 选择单个目标数据集做分类微调。
-4. 微调阶段只使用目标数据集自己的 trial 或 block 切窗逻辑，并按 LOSO 划分 train、val、test。
+- `cache/ds002336`
+- `cache/ds002338`
+- `cache/ds002739`
 
-旧的“按单数据集单独跑 contrastive，再逐折做 contrastive 验证”的流程已经删除。当前不再支持旧的 per-dataset contrastive 运行脚本，也不再保留旧的单数据集 contrastive 配置文件。
+### 8.1 ds002336 / ds002338
 
-## 当前目录
+脚本：
 
-```text
-EEG-fMRI-Contrastive/
-  README.md
-  requirements.txt
-  run_train.py
-  run_finetune.py
-  run_optuna_search.py
-  configs/
-    train_joint_contrastive.yaml
-    finetune_ds002336.yaml
-    finetune_ds002338.yaml
-    finetune_ds002739.yaml
-    optuna_ds002336.yaml
-    optuna_ds002338.yaml
-    optuna_ds002739.yaml
-  preprocess/
-    prepare_ds00233x.py
-    prepare_ds002739.py
-    prepare_joint_contrastive.py
-    run_spm_preproc_ds00233x.m
-    preprocess_common.py
-  mmcontrast/
-    contrastive_runner.py
-    contrastive_trainer.py
-    finetune_runner.py
-    finetune_trainer.py
-    datasets/
-    models/
-    losses.py
-    metrics.py
-  scripts/
-    run_pretrain_and_finetune.ps1
-    run_optuna_pretrain_and_finetune.ps1
-    prepare_joint_contrastive.ps1
-    ds00233x/
-      prepare_ds00233x.ps1
-      prepare_ds00233x_spm.ps1
-    ds002739/
-      prepare_ds002739.ps1
-  scripts_linux/
-    run_pretrain_and_finetune.sh
-    run_optuna_pretrain_and_finetune.sh
-    prepare_joint_contrastive.sh
-    ds00233x/
-      prepare_ds00233x.sh
-      prepare_ds00233x_spm.sh
-    ds002739/
-      prepare_ds002739.sh
+- Windows: `scripts/ds00233x/prepare_ds00233x.ps1`
+- Linux: `scripts_linux/ds00233x/prepare_ds00233x.sh`
+
+默认行为：
+
+- EEG 按 block 切分
+- `block_window_sec=8.0`
+- `block_overlap_sec=2.0`
+- EEG patch 形状通常为 `[C, 8, 200]`
+- 默认生成 `loso_subjectwise`
+- 默认 `eeg_only`
+- 可通过 `--target-channel-manifest` 对齐公共通道顺序
+
+#### Windows
+
+```powershell
+.\scripts\ds00233x\prepare_ds00233x.ps1 `
+  -DatasetName ds002336 `
+  -DsRoot ..\ds002336 `
+  -OutputRoot cache\ds002336 `
+  -SplitMode loso `
+  -TrainingReady `
+  -EegOnly `
+  -TargetChannelManifest cache\joint_contrastive\eeg_channels_target.csv
 ```
 
-## Linux 脚本说明
+```powershell
+.\scripts\ds00233x\prepare_ds00233x.ps1 `
+  -DatasetName ds002338 `
+  -DsRoot ..\ds002338 `
+  -OutputRoot cache\ds002338 `
+  -SplitMode loso `
+  -TrainingReady `
+  -EegOnly `
+  -TargetChannelManifest cache\joint_contrastive\eeg_channels_target.csv
+```
 
-- `scripts_linux/` 下提供与 `scripts/` 同名、同用途的 Bash 版本入口脚本。
-- 原有 PowerShell 脚本保留不变，Windows 用户继续使用 `scripts/`。
-- Linux/macOS 用户建议使用 `scripts_linux/`。
-
-首次使用建议先授予执行权限：
+#### Linux
 
 ```bash
-chmod +x scripts_linux/*.sh scripts_linux/ds00233x/*.sh scripts_linux/ds002739/*.sh
-```
-
-## 核心规则
-
-### 1. 联合预训练和微调已经解耦
-
-联合预训练使用 [preprocess/prepare_joint_contrastive.py](preprocess/prepare_joint_contrastive.py)。
-
-- 以单个 fMRI TR 为锚点。
-- 对每个 TR 提取该时刻之前固定长度的连续 EEG 窗口，默认 8 s。
-- 步长固定为 1 TR。
-- 允许跨 trial 提取 EEG，只要 run 内时间轴连续。
-- 不再按 EEG event index 和 fMRI event index 直接一一配对。
-- 预训练阶段不再划分 train、val、test，全部样本直接写入一个 manifest_all.csv，全部作为训练集。
-
-单数据集微调使用 [preprocess/prepare_ds00233x.py](preprocess/prepare_ds00233x.py) 或 [preprocess/prepare_ds002739.py](preprocess/prepare_ds002739.py)。
-
-- 仍然是目标数据集自己的分类切窗逻辑。
-- EEG 不允许跨 trial。
-- 标签来自当前 trial 或 block 的分类定义。
-- 微调阶段才做 LOSO 划分。
-- 微调读取阶段会再次按有序目标通道子集映射 EEG（`data.eeg_channel_subset: auto`），最终送入模型的是通道子集后的张量。
-
-### 2. 可选数据集联合预训练
-
-如果只选择 ds002336：
-
-- 只处理 ds002336。
-- 生成 ds002336 的联合预训练样本。
-- 直接把这些样本全部送入 contrastive 训练。
-
-如果同时选择 ds002336 和 ds002739：
-
-- 分别处理两个数据集。
-- 在预处理阶段完成时间对齐和通道统一。
-- 把两个数据集的预训练样本拼接成一个 joint manifest。
-- 再统一送入 contrastive 训练。
-
-现在也支持 ds002338：
-
-- 可单独把 ds002338 预处理并追加到已有 joint cache。
-- 可与 ds002336、ds002739 任意组合做联合预训练。
-- ds002338 走 ds002336 同模板流程，且 fMRI 仍要求先经 MATLAB SPM 预处理。
-
-### 3. 联合 cache 增量更新
-
-- `scripts/prepare_joint_contrastive.ps1` 新增默认增量模式：cache 已有数据集时，默认跳过该数据集重算。
-- 仅当你显式传 `-ForceRefreshDatasets` 时才会重算指定数据集。
-- `prepare_joint_contrastive.py` 支持 ds002336 与 ds002338 数据集级并行（`--num-workers`）。
-- 新增数据集接入时，会只处理新增数据集，并更新：
-  - 通道名称规范化
-  - 公共通道交集
-  - 通道映射关系
-- 如果目标通道交集缩小，脚本会对已缓存 subject pack 的 EEG 通道做增量重映射，不会强制全量重导所有数据集。
-
-### 4. subject 命名统一
-
-- 所有数据集导出的标准 subject 统一为 sub01、sub02 这种格式。
-- 多数据集场景下再加 subject_uid，格式为 <dataset>_<subject>，例如 ds002336_sub01、ds002739_sub01。
-- original_subject 只保留在映射表中做追踪。
-- 每次预处理都会导出 subject_mapping.csv。
-
-### 5. EEG 通道统一
-
-- 跨数据集联合预训练前，会先规范化各数据集 EEG 通道名称。
-- 公共通道交集按名称求，不按索引求。
-- 所有数据集在联合预训练阶段映射到相同通道集合和相同顺序。
-- 预处理会导出：
-  - eeg_channels_dataset.csv
-  - eeg_channels_target.csv
-  - eeg_channel_mapping.csv
-- 目标数据集微调如果要复用 joint pretrain backbone，应传入 joint 导出的 eeg_channels_target.csv，保证输入通道顺序一致。
-
-## 环境准备
-
-```powershell
-conda activate mamba
-cd D:\OpenNeuro\EEG-fMRI-Contrastive
-pip install -r requirements.txt
-```
-
-Linux/macOS：
-
-```bash
-conda activate mamba
-cd /path/to/OpenNeuro/EEG-fMRI-Contrastive
-pip install -r requirements.txt
-```
-
-如果出现 `ModuleNotFoundError: No module named 'nibabel'`，先确认当前环境是 `mamba`，再执行：
-
-```powershell
-python -m pip install -r requirements.txt
-```
-
-## 数据预处理入口（推荐先执行）
-
-联合数据集预处理（只构建联合缓存，不启动对比学习和微调）：
-
-```powershell
-.\scripts\prepare_joint_contrastive.ps1 -Datasets ds002338 -OutputRoot cache\joint_contrastive
+./scripts_linux/ds00233x/prepare_ds00233x.sh \
+  --dataset-name ds002336 \
+  --ds-root ../ds002336 \
+  --output-root cache/ds002336 \
+  --split-mode loso \
+  --training-ready \
+  --eeg-only \
+  --target-channel-manifest cache/joint_contrastive/eeg_channels_target.csv
 ```
 
 ```bash
-./scripts_linux/prepare_joint_contrastive.sh --datasets ds002338 --output-root cache/joint_contrastive
+./scripts_linux/ds00233x/prepare_ds00233x.sh \
+  --dataset-name ds002338 \
+  --ds-root ../ds002338 \
+  --output-root cache/ds002338 \
+  --split-mode loso \
+  --training-ready \
+  --eeg-only \
+  --target-channel-manifest cache/joint_contrastive/eeg_channels_target.csv
 ```
 
-单数据集微调预处理：
+### 8.2 ds002336 / ds002338 的 SPM 版本
+
+如果你已经准备好 MATLAB + SPM，可以先做 SPM fMRI 预处理，再走 Python 打包：
+
+#### Windows
 
 ```powershell
-.\scripts\ds00233x\prepare_ds00233x.ps1 -DatasetName ds002338 -DsRoot ..\ds002338 -OutputRoot cache\ds002338
+.\scripts\ds00233x\prepare_ds00233x_spm.ps1 `
+  -DatasetName ds002338 `
+  -DsRoot ..\ds002338 `
+  -OutputRoot cache\ds002338 `
+  -SplitMode loso `
+  -TrainingReady `
+  -EegOnly `
+  -TargetChannelManifest cache\joint_contrastive\eeg_channels_target.csv
 ```
+
+#### Linux
 
 ```bash
-./scripts_linux/ds00233x/prepare_ds00233x.sh --dataset-name ds002338 --ds-root ../ds002338 --output-root cache/ds002338
+./scripts_linux/ds00233x/prepare_ds00233x_spm.sh \
+  --dataset-name ds002338 \
+  --ds-root ../ds002338 \
+  --output-root cache/ds002338 \
+  --split-mode loso \
+  --training-ready \
+  --eeg-only \
+  --target-channel-manifest cache/joint_contrastive/eeg_channels_target.csv
 ```
 
-现在文档顺序为：先预处理，再训练入口。
+### 8.3 ds002739
 
-## 唯一主入口
+脚本：
 
-正式入口只有一个：
+- Windows: `scripts/ds002739/prepare_ds002739.ps1`
+- Linux: `scripts_linux/ds002739/prepare_ds002739.sh`
+
+默认行为：
+
+- EEG 目标采样率 `200 Hz`
+- EEG 默认窗口 `8.0` 秒
+- fMRI 默认窗口 `6.0` 秒
+- 默认生成 `loso_subjectwise`
+- 默认 `eeg_only`
+- 可通过 `--target-channel-manifest` 对齐公共通道顺序
+
+#### Windows
 
 ```powershell
-.\scripts\run_pretrain_and_finetune.ps1
+.\scripts\ds002739\prepare_ds002739.ps1 `
+  -DsRoot ..\ds002739 `
+  -OutputRoot cache\ds002739 `
+  -SplitMode loso `
+  -TrainingReady `
+  -EegOnly `
+  -TargetChannelManifest cache\joint_contrastive\eeg_channels_target.csv
 ```
+
+#### Linux
 
 ```bash
-./scripts_linux/run_pretrain_and_finetune.sh
+./scripts_linux/ds002739/prepare_ds002739.sh \
+  --ds-root ../ds002739 \
+  --output-root cache/ds002739 \
+  --split-mode loso \
+  --training-ready \
+  --eeg-only \
+  --target-channel-manifest cache/joint_contrastive/eeg_channels_target.csv
 ```
 
-这个脚本会做两件事：
+## 9. 联合预训练
 
-1. 根据 PretrainDatasets 生成联合预训练缓存并训练 contrastive backbone。
-2. 根据 TargetDataset 生成单数据集微调缓存并执行 LOSO 微调。
+主入口：
 
-### 常用参数
+- `run_train.py`
 
-- PretrainDatasets：预训练使用哪些数据集，可选 ds002336、ds002338、ds002739。
-- TargetDataset：微调目标数据集，只能选一个。
-- JointTrainConfig：联合预训练配置，默认 [configs/train_joint_contrastive.yaml](configs/train_joint_contrastive.yaml)。
-- Ds002336FinetuneConfig：ds002336 微调配置。
-- Ds002739FinetuneConfig：ds002739 微调配置。
-- JointCacheRoot：联合预训练缓存目录，默认 cache/joint_contrastive。
-- JointOutputRoot：联合预训练输出目录，默认 outputs/joint_contrastive。
-- PretrainedWeightsDir：联合预训练 best checkpoint 统一存放目录，默认 pretrained_weights。
-- JointEegWindowSec：联合预训练的 EEG 连续上下文窗口长度，默认 8 秒。
-- PretrainEpochs：覆盖 contrastive epoch。
-- FinetuneEpochs：覆盖 finetune epoch。
-- PretrainBatchSize：仅覆盖预训练 batch size。
-- FinetuneBatchSize：仅覆盖微调训练 batch size。
-- BatchSize：兼容旧参数，会同时覆盖 PretrainBatchSize 和 FinetuneBatchSize。
-- EvalBatchSize：覆盖微调评估 batch size。
-- NumWorkers：覆盖 DataLoader worker 数。
-- NumWorkers：也会传递给联合预处理脚本，用于 ds002336 / ds002338 并行处理。
-- SkipPretrain：跳过联合预训练，只做微调。
-- SkipFinetune：跳过微调，只做联合预训练。
-- TestOnly：只加载已有微调 checkpoint 做测试。
-- ForceCpu：强制 CPU。
+默认配置：
 
-脚本会在微调前打印预训练 best checkpoint 来源，默认路径为 `pretrained_weights/contrastive_best.pth`（由 `JointOutputRoot/contrastive/checkpoints/best.pth` 同步而来）。如果路径不存在，会显式提示当前微调将不加载对比学习权重。
+- `configs/train_joint_contrastive.yaml`
 
-计时日志已统一为 fold/stage 级：
-
-- 预训练阶段在 `contrastive/final_metrics.json` 记录 `fold_elapsed_seconds`。
-- 微调阶段在每个 fold 结束打印 `fold_elapsed=...s`，并在每折 `final_metrics.json` 记录 `fold_elapsed_seconds`。
-
-### 示例 1：只用 ds002336 预训练，并在 ds002336 上微调
-
-```powershell
-.\scripts\run_pretrain_and_finetune.ps1 -PretrainDatasets ds002336 -TargetDataset ds002336
-```
-
-### 示例 2：用 ds002336 和 ds002739 联合预训练，再在 ds002739 上微调
-
-```powershell
-.\scripts\run_pretrain_and_finetune.ps1 -PretrainDatasets ds002336,ds002739 -TargetDataset ds002739
-```
-
-### 示例 2b：先追加 ds002338 到 joint cache，再在 ds002338 上微调
-
-```powershell
-.\scripts\run_pretrain_and_finetune.ps1 -PretrainDatasets ds002338 -TargetDataset ds002338
-```
-
-### 示例 3：跳过预训练，只复用已有 joint checkpoint 做 ds002336 微调
-
-```powershell
-.\scripts\run_pretrain_and_finetune.ps1 -SkipPretrain -TargetDataset ds002336
-```
-
-## 低层入口
-
-如果你只想单独运行某一步，也可以直接调用低层脚本。
-
-### 联合预训练数据预处理
-
-```powershell
-.\scripts\prepare_joint_contrastive.ps1
-```
-
-```bash
-./scripts_linux/prepare_joint_contrastive.sh
-```
-
-输出目录默认是 cache/joint_contrastive，关键文件包括：
-
-- manifest_all.csv
-- run_summary.csv
-- subject_mapping.csv
-- eeg_channels_dataset.csv
-- eeg_channels_target.csv
-- eeg_channel_mapping.csv
-
-常用增量参数：
-
-- `-SkipExistingDatasets $true`：默认启用，已存在数据集跳过重算。
-- `-ForceRefreshDatasets ds002336`：仅重算指定数据集。
-
-### 单数据集微调预处理
-
-ds002336 / ds002338（通用 233x 入口）：
-
-```powershell
-.\scripts\ds00233x\prepare_ds00233x.ps1 -DatasetName ds002336 -DsRoot ..\ds002336 -OutputRoot cache\ds002336
-.\scripts\ds00233x\prepare_ds00233x.ps1 -DatasetName ds002338 -DsRoot ..\ds002338 -OutputRoot cache\ds002338
-```
-
-```bash
-./scripts_linux/ds00233x/prepare_ds00233x.sh --dataset-name ds002336 --ds-root ../ds002336 --output-root cache/ds002336
-./scripts_linux/ds00233x/prepare_ds00233x.sh --dataset-name ds002338 --ds-root ../ds002338 --output-root cache/ds002338
-```
-
-ds002336 / ds002338（先跑 MATLAB SPM，再跑 Python 预处理）：
-
-```powershell
-.\scripts\ds00233x\prepare_ds00233x_spm.ps1 -DatasetName ds002336 -DsRoot ..\ds002336 -OutputRoot cache\ds002336 -ParallelWorkers 4
-.\scripts\ds00233x\prepare_ds00233x_spm.ps1 -DatasetName ds002338 -DsRoot ..\ds002338 -OutputRoot cache\ds002338 -ParallelWorkers 4
-```
-
-```bash
-./scripts_linux/ds00233x/prepare_ds00233x_spm.sh --dataset-name ds002336 --ds-root ../ds002336 --output-root cache/ds002336 --parallel-workers 4
-./scripts_linux/ds00233x/prepare_ds00233x_spm.sh --dataset-name ds002338 --ds-root ../ds002338 --output-root cache/ds002338 --parallel-workers 4
-```
-
-`prepare_ds00233x_spm.ps1` 的 `-ParallelWorkers` 可直接控制 MATLAB 并行核心数，会调用 [preprocess/run_spm_preproc_ds00233x.m](preprocess/run_spm_preproc_ds00233x.m)。
-
-ds002739：
-
-```powershell
-.\scripts\ds002739\prepare_ds002739.ps1
-```
-
-```bash
-./scripts_linux/ds002739/prepare_ds002739.sh
-```
-
-如果目标数据集微调要复用联合预训练的 backbone，建议把 joint 导出的 eeg_channels_target.csv 传给对应 prepare 脚本的 TargetChannelManifest。
-
-## 训练入口
-
-- [run_train.py](run_train.py) 只用于联合对比学习预训练，只接受一个 manifest。
-- [run_finetune.py](run_finetune.py) 只用于单目标数据集微调，仍然接受 train、val、test 三个 manifest。
-
-## 当前配置约定
-
-### 联合预训练
-
-配置文件： [configs/train_joint_contrastive.yaml](configs/train_joint_contrastive.yaml)
-
-- data.manifest_csv 指向 joint manifest_all.csv。
-- 预训练阶段不再使用 val_manifest_csv 或 test_manifest_csv。
-- contrastive 训练不再执行验证逻辑，checkpoint 仅按 train loss 选择。
-- EEG/fMRI 编码器是否加载已有权重由 `eeg_model.checkpoint_path` 与 `fmri_model.checkpoint_path` 控制。
-  - 为空字符串：随机初始化。
-  - 非空：在构建模型时加载对应 checkpoint（路径相对项目根目录解析）。
-
-代码入口（联合预训练读取权重的位置）：
-
-- [mmcontrast/contrastive_trainer.py](mmcontrast/contrastive_trainer.py)：`build_model()` 会把 `eeg_model.checkpoint_path`/`fmri_model.checkpoint_path` 传入编码器。
-- [mmcontrast/models/eeg_adapter.py](mmcontrast/models/eeg_adapter.py)：`EEGCBraModAdapter` 在 `checkpoint_path` 非空时加载权重。
-- [mmcontrast/models/fmri_adapter.py](mmcontrast/models/fmri_adapter.py)：`FMRINeuroSTORMAdapter` 在 `checkpoint_path` 非空时加载权重。
-
-实操示例（让联合预训练先加载 EEG+fMRI 预训练权重）：
-
-```powershell
-python .\run_train.py --config configs\train_joint_contrastive.yaml `
-  --set eeg_model.checkpoint_path='pretrained_weights/CBraMod_pretrained_weights.pth' `
-  --set fmri_model.checkpoint_path='pretrained_weights/pt_neurostorm_mae_ratio0.5.ckpt'
-```
-
-### 单数据集微调
-
-配置文件：
-
-- [configs/finetune_ds002336.yaml](configs/finetune_ds002336.yaml)
-- [configs/finetune_ds002338.yaml](configs/finetune_ds002338.yaml)
-- [configs/finetune_ds002739.yaml](configs/finetune_ds002739.yaml)
-
-这些配置仍然保留 LOSO 微调所需的 train、val、test manifest 结构。
-
-### EEG Baseline 权重策略
-
-`finetune.eeg_baseline` 现已支持以下策略：
-
-- `category=traditional`：始终随机初始化，不加载预训练权重。
-- `category=foundation`：通过 `load_pretrained_weights` 控制是否加载权重。
-  - `true`：按模型类型加载（例如 cbramod 从 `finetune.contrastive_checkpoint_path` 提取 EEG encoder）。
-  - `false`：强制随机初始化。
-
-新增 LaBraM baseline 选项：
-
-- `model_name: labram`
-- `labram_model_name: labram_base_patch200_200`（可改 large/huge）
-- `checkpoint_path: pretrained_weights/labram-base.pth`
-
-注意：当前 LaBraM baseline 需要输入 EEG 通道数为 62。
-
-### 新增 Baseline 的改动清单
-
-如果你要增加一个新的 baseline（把 LaBraM 当作 baseline 就属于这类场景），建议按下面的分层改：
-
-1. 模型定义放哪里
-- 通用骨干定义：放在 [mmcontrast/backbones](mmcontrast/backbones) 下，建议按模态建子目录（例如 `eeg_xxx`）。
-- 训练侧适配器（统一输入输出、加载 checkpoint）：放在 [mmcontrast/models](mmcontrast/models)（例如 [mmcontrast/models/eeg_labram_adapter.py](mmcontrast/models/eeg_labram_adapter.py)）。
-- baseline 路由与策略（traditional/foundation、是否加载预训练）：放在 [mmcontrast/baselines/eeg_baseline.py](mmcontrast/baselines/eeg_baseline.py)。
-
-2. 配置校验必须同步
-- 在 [mmcontrast/config.py](mmcontrast/config.py) 的 baseline 白名单里注册 `model_name`，否则配置会在训练前被拦截。
-- 如果 baseline 需要专用 checkpoint（如 LaBraM），在这里补充路径存在性校验。
-
-3. 配置文件与入口参数
-- 在 [configs/finetune_ds002336.yaml](configs/finetune_ds002336.yaml)、[configs/finetune_ds002338.yaml](configs/finetune_ds002338.yaml)、[configs/finetune_ds002739.yaml](configs/finetune_ds002739.yaml) 增加/同步 baseline 字段默认值。
-- 如果需要命令行覆盖项，补充 [run_finetune.py](run_finetune.py) 的参数映射。
-
-4. 最低验证
-- 先跑 `python -m py_compile` 做语法校验。
-- 再用单 fold 小 epoch（或 `optuna --dry-run`）验证配置链路确实命中你的 baseline。
-
-### 微调阶段如何控制是否读取预训练权重
-
-代码入口（微调读取权重的位置）：
-
-- [mmcontrast/finetune_trainer.py](mmcontrast/finetune_trainer.py)：初始化时解析并写入 `finetune.contrastive_checkpoint_path`。
-- [mmcontrast/models/classifier.py](mmcontrast/models/classifier.py)：
-  - `finetune.contrastive_checkpoint_path` 非空时，加载整套对比学习 backbone（EEG+fMRI）参数。
-  - 若为空但 `eeg_model.checkpoint_path`/`fmri_model.checkpoint_path` 有值，则分别走模态级 checkpoint。
-- [mmcontrast/baselines/eeg_baseline.py](mmcontrast/baselines/eeg_baseline.py)：`finetune.eeg_baseline.load_pretrained_weights` 控制 baseline 是否加载预训练权重（含 LaBraM）。
-
-控制方式：
-
-- 默认主流程 [scripts/run_pretrain_and_finetune.ps1](scripts/run_pretrain_and_finetune.ps1) 会把联合预训练 best checkpoint 同步到 `pretrained_weights/contrastive_best.pth`，并在微调时自动传给 `--contrastive-checkpoint`。
-- 禁用“加载对比学习权重”：把 `finetune.contrastive_checkpoint_path` 置空（或不要传 `--contrastive-checkpoint`）。
-- 使用 EEG baseline 且禁用其预训练加载：设置 `finetune.eeg_baseline.load_pretrained_weights: false`。
-- 使用 LaBraM baseline：设置 `model_name: labram`，并将 `checkpoint_path` 指向 `pretrained_weights/labram-base.pth`。
-
-## EEG Baseline 模型
-
-微调阶段支持使用 7 个 EEG 基线模型，分为两类：
-
-### 基础模型（Foundation Models）
-
-基础模型需要额外的分类头，支持加载预训练权重：
-
-1. **LaBraM** - 大规模 EEG 基础模型
-2. **CBraMod** - 对比学习预训练的 EEG 骨干
-
-### 传统模型（Traditional Models）
-
-传统模型是端到端的分类模型，内置分类头，不需要额外分类头：
-
-3. **SVM** - 支持向量机（传统机器学习基线）
-4. **EEG-Deformer** - Deformer 架构（CNN + Transformer + DIP 融合）
-5. **EEGNet** - 经典 EEG 深度学习方法
-6. **Conformer** - CNN + Transformer 混合架构
-7. **TSception** - 多尺度时空卷积网络
-
-所有模型定义均严格遵循官方实现，不从外部模型文件导入。
-
-### 配置方法
-
-在微调配置文件中设置 `finetune.eeg_baseline`：
+关键配置项：
 
 ```yaml
-finetune:
-  eeg_baseline:
-    enabled: true
-    model_name: eegnet  # 7 个选项：svm, labram, cbramod, eeg_deformer, eegnet, conformer, tsception
-    num_classes: 2
-    num_channels: 62
-    num_timepoints: 200
-    load_pretrained_weights: false  # 基础模型设为 true 可加载预训练权重
-    checkpoint_path: ""  # 基础模型预训练权重路径
+train:
+  temperature: 0.07
+  band_power_loss_weight: 1.0
+  separation_loss_weight: 0.1
+  head_dropout: 0.0
+
+eeg_model:
+  shared_dim: 256
+  private_dim: 256
+  band_power_dim: 5
+
+fmri_model:
+  shared_dim: 256
 ```
 
-### 模型类别与融合策略
-
-- **传统模型**（svm, eeg_deformer, eegnet, conformer, tsception）：
-  - 内置分类头，直接输出 logits
-  - 仅支持 `finetune.fusion: eeg_only`
-  - 不需要额外分类头
-
-- **基础模型**（labram, cbramod）：
-  - 输出特征向量，需要额外分类头
-  - 支持所有融合策略（eeg_only, fmri_only, concat）
-  - 可通过 `load_pretrained_weights: true` 加载预训练权重
-
-### 使用示例
-
-使用 EEGNet 作为基线（传统模型）：
+### 9.1 Windows
 
 ```powershell
-python .\run_finetune.py --config configs\finetune_ds002336.yaml `
-  --set finetune.eeg_baseline.enabled=true `
-  --set finetune.eeg_baseline.model_name=eegnet `
-  --set finetune.fusion=eeg_only
+python .\run_train.py `
+  --config configs\train_joint_contrastive.yaml `
+  --manifest cache\joint_contrastive\manifest_all.csv `
+  --root-dir cache\joint_contrastive `
+  --output-dir outputs\joint_contrastive\contrastive
 ```
 
-使用 LaBraM 作为基线（基础模型，加载预训练权重）：
+### 9.2 Linux
 
-```powershell
-python .\run_finetune.py --config configs\finetune_ds002336.yaml `
-  --set finetune.eeg_baseline.enabled=true `
-  --set finetune.eeg_baseline.model_name=labram `
-  --set finetune.eeg_baseline.load_pretrained_weights=true `
-  --set finetune.eeg_baseline.checkpoint_path=pretrained_weights/labram-base.pth `
-  --set finetune.fusion=eeg_only
-```
-
-### 添加新基线模型
-
-如需添加新的基线模型，需要修改以下文件：
-
-1. **模型定义**：[mmcontrast/baselines/eeg_baseline.py](mmcontrast/baselines/eeg_baseline.py)
-   - 添加模型类（严格遵循官方实现）
-   - 在 `VALID_MODEL_NAMES` 中注册
-   - 在 `MODEL_CATEGORIES` 中指定类别
-
-2. **配置校验**：[mmcontrast/config.py](mmcontrast/config.py)
-   - 在 baseline 白名单中注册 `model_name`
-
-3. **配置文件**：更新所有 `finetune_*.yaml` 的默认值
-
-4. **验证**：
-   ```powershell
-   python -m py_compile mmcontrast/baselines/eeg_baseline.py
-   python -c "from mmcontrast.baselines import EEGBaselineModel; m = EEGBaselineModel(model_name='new_model', num_classes=2, num_channels=62, num_timepoints=200)"
-   ```
-
-## Optuna
-
-Optuna 现在仍然保留，但已经切换到当前的新主流程，不再依赖旧的单数据集 contrastive 运行脚本。
-
-Optuna 现在仍然保留，但已经切换到当前的新主流程，不再依赖旧的单数据集 contrastive 运行脚本。
-
-你可以先用 dry-run 快速确认 study 配置是否真实被执行链路消费：
-
-```powershell
-python .\run_optuna_search.py --study-config configs\optuna_ds002336.yaml --mode full --dry-run
-python .\run_optuna_search.py --study-config configs\optuna_ds002739.yaml --mode full --dry-run
-```
-
-### 入口
-
-- [run_optuna_search.py](run_optuna_search.py)：通用 Optuna 搜索入口。
-- [scripts/run_optuna_pretrain_and_finetune.ps1](scripts/run_optuna_pretrain_and_finetune.ps1)：把单个 trial 的输出目录映射到当前唯一主流程的包装脚本。
-
-### Study 配置
-
-- [configs/optuna_ds002336.yaml](configs/optuna_ds002336.yaml)
-- [configs/optuna_ds002338.yaml](configs/optuna_ds002338.yaml)
-- [configs/optuna_ds002739.yaml](configs/optuna_ds002739.yaml)
-
-Linux 请使用对应副本（避免 `powershell` 命令缺失）：
-
-- [configs/optuna_ds002336_linux.yaml](configs/optuna_ds002336_linux.yaml)
-- [configs/optuna_ds002338_linux.yaml](configs/optuna_ds002338_linux.yaml)
-- [configs/optuna_ds002739_linux.yaml](configs/optuna_ds002739_linux.yaml)
-
-这三个配置已经适配当前工作流：
-
-- full：联合预训练 + 单目标数据集微调。
-- finetune_only：跳过预训练，只做目标数据集微调。
-- pretrain_only：跳过微调，只做联合预训练。
-
-`pretrain_only` 下，真正参与搜索与执行的是：
-
-- `runtime_configs.train_base`（默认 `configs/train_joint_contrastive.yaml`）
-- mode 的 `parameter_groups` 里属于 `pretrain` 的参数
-- `study.static_args` 里的 `-PretrainDatasets`
-
-因此，不同 `optuna_ds*.yaml` 在 `pretrain_only` 模式下是否“结果一样”，取决于这三部分是否完全一致。
-如果三者一致，则搜索空间和目标一致，结果分布应接近；如果有任一项不同（例如 `-PretrainDatasets` 或参数范围不同），结果就会不同。
-
-并且现在支持 `parameter_groups`，用于按阶段组织搜索参数：
-
-- `pretrain`：只作用于 `train_joint_contrastive.yaml`。
-- `finetune`：只作用于 `finetune_*.yaml`。
-
-`modes.<mode>.parameter_groups` 会决定该模式下启用哪些参数组。
-如果某个 mode 通过 `-SkipPretrain` 或 `-SkipFinetune` 关闭了某个阶段，`run_optuna_search.py` 会自动只加载激活阶段的 runtime config，未激活阶段的参数更新会被自动忽略，不会再出现“LOSO 微调模式却混入对比学习参数”的问题。
-
-### 当前保留的搜索参数
-
-参数选择已经按你之前那套恢复进来了：
-
-- train_epochs
-- pretrain_batch_size
-- finetune_batch_size
-- pretrain_lr
-- finetune_lr
-- weight_decay
-- min_lr
-- hidden_dim
-- grad_clip
-- early_stop_patience
-
-其中 ds002336 和 ds002739 各自的候选值也保留了之前的区别，例如 pretrain/finetune 的 batch size、train_epochs 和 early_stop_patience 的搜索范围仍然沿用原来的两套配置。
-
-### parameter_names / parameter_groups 含义
-
-- `parameter_names`：直接列出当前 mode 启用的参数名。
-- `parameter_groups`：先在顶层定义参数组（如 `pretrain`、`finetune`），再在 mode 里引用分组。
-
-推荐优先使用 `parameter_groups`，结构更清晰，也更适合 full / finetune_only / pretrain_only 三种模式复用。
-
-### 使用示例
-
-搜索 ds002336 的完整流程：
-
-```powershell
-python .\run_optuna_search.py --study-config configs\optuna_ds002336.yaml --mode full
-```
-
-只搜索 ds002739 的微调阶段：
-
-```powershell
-python .\run_optuna_search.py --study-config configs\optuna_ds002739.yaml --mode finetune_only
-```
-
-只搜索联合预训练阶段：
-
-```powershell
-python .\run_optuna_search.py --study-config configs\optuna_ds002336.yaml --mode pretrain_only
-```
-
-你也可以对任意目标 study 配置跑 `pretrain_only`，它会统一走联合对比学习评估指标：
-
-```powershell
-python .\run_optuna_search.py --study-config configs\optuna_ds002739.yaml --mode pretrain_only
-python .\run_optuna_search.py --study-config configs\optuna_ds002338.yaml --mode pretrain_only
-```
-
-Linux 示例：
-
-```bash
-python ./run_optuna_search.py --study-config configs/optuna_ds002338_linux.yaml --mode full
-python ./run_optuna_search.py --study-config configs/optuna_ds002338_linux.yaml --mode pretrain_only
-```
-
-### Optuna 每个 trial 使用多 GPU（trial 串行）
-
-当前 `run_optuna_search.py` 采用串行 trial（不会并发启动多个 trial）。
-
-- 也就是说：一次只跑一个 trial。
-- 当你设置 `--gpu-count > 1` 时，是“当前 trial 内部”用 DDP 多卡训练。
-- 适用于 full / finetune_only / pretrain_only 三种 mode。
-
-Windows 示例（每个 trial 使用 2 张卡）：
-
-```powershell
-python .\run_optuna_search.py --study-config configs\optuna_ds002336.yaml --mode full --gpu-count 2
-```
-
-Windows 指定物理卡（例如仅用 0,1）：
-
-```powershell
-python .\run_optuna_search.py --study-config configs\optuna_ds002336.yaml --mode finetune_only --gpu-count 2 --gpu-ids 0,1
-```
-
-Linux 示例：
-
-```bash
-python ./run_optuna_search.py --study-config configs/optuna_ds002338_linux.yaml --mode full --gpu-count 2 --gpu-ids 0,1
-```
-
-实现方式：
-
-- Optuna wrapper 会把 `gpu-count/gpu-ids` 透传到主流程脚本。
-- 主流程在每个 trial 内使用 `python -m torch.distributed.run --nproc_per_node=<gpu_count>` 启动 `run_train.py` / `run_finetune.py`。
-- 当 `--gpu-count=1` 或启用 `--force-cpu` 时，自动回退为单进程运行。
-
-### 多 GPU 联合预训练示例
-
-如果只想跳过主入口脚本，直接对已经准备好的 joint cache 启动联合对比学习预训练，也可以直接调用 `run_train.py`。
-
-单卡：
 ```bash
 python run_train.py \
   --config configs/train_joint_contrastive.yaml \
@@ -706,11 +516,284 @@ python run_train.py \
   --output-dir outputs/joint_contrastive/contrastive
 ```
 
-多卡：
-```bash
-torchrun --nproc_per_node=2 run_train.py \
-  --config configs/train_joint_contrastive.yaml \
-  --manifest cache/joint_contrastive/manifest_all.csv \
-  --root-dir cache/joint_contrastive \
-  --output-dir outputs/joint_contrastive/contrastive
+### 9.3 常用覆盖参数
+
+#### Windows
+
+```powershell
+python .\run_train.py `
+  --config configs\train_joint_contrastive.yaml `
+  --set train.epochs=30 `
+  --set train.batch_size=16 `
+  --set train.eval_batch_size=16 `
+  --set train.lr=3e-4 `
+  --set train.band_power_loss_weight=1.0 `
+  --set train.separation_loss_weight=0.1
 ```
+
+#### Linux
+
+```bash
+python run_train.py \
+  --config configs/train_joint_contrastive.yaml \
+  --set train.epochs=30 \
+  --set train.batch_size=16 \
+  --set train.eval_batch_size=16 \
+  --set train.lr=3e-4 \
+  --set train.band_power_loss_weight=1.0 \
+  --set train.separation_loss_weight=0.1
+```
+
+## 10. 单数据集微调
+
+主入口：
+
+- `run_finetune.py`
+
+微调配置文件：
+
+- `configs/finetune_ds002336.yaml`
+- `configs/finetune_ds002338.yaml`
+- `configs/finetune_ds002739.yaml`
+
+当前默认是 EEG-only 微调：
+
+```yaml
+finetune:
+  fusion: eeg_only
+  classifier_mode: concat
+```
+
+`classifier_mode` 可选：
+
+- `shared`
+- `private`
+- `concat`
+
+### 10.1 ds002336
+
+#### Windows
+
+```powershell
+python .\run_finetune.py `
+  --config configs\finetune_ds002336.yaml `
+  --classifier-mode concat
+```
+
+#### Linux
+
+```bash
+python run_finetune.py \
+  --config configs/finetune_ds002336.yaml \
+  --classifier-mode concat
+```
+
+### 10.2 ds002338
+
+#### Windows
+
+```powershell
+python .\run_finetune.py `
+  --config configs\finetune_ds002338.yaml `
+  --classifier-mode concat
+```
+
+#### Linux
+
+```bash
+python run_finetune.py \
+  --config configs/finetune_ds002338.yaml \
+  --classifier-mode concat
+```
+
+### 10.3 ds002739
+
+#### Windows
+
+```powershell
+python .\run_finetune.py `
+  --config configs\finetune_ds002739.yaml `
+  --classifier-mode concat
+```
+
+#### Linux
+
+```bash
+python run_finetune.py \
+  --config configs/finetune_ds002739.yaml \
+  --classifier-mode concat
+```
+
+### 10.4 指定 checkpoint
+
+#### Windows
+
+```powershell
+python .\run_finetune.py `
+  --config configs\finetune_ds002338.yaml `
+  --contrastive-checkpoint outputs\joint_contrastive\contrastive\checkpoints\best.pth `
+  --classifier-mode concat
+```
+
+#### Linux
+
+```bash
+python run_finetune.py \
+  --config configs/finetune_ds002338.yaml \
+  --contrastive-checkpoint outputs/joint_contrastive/contrastive/checkpoints/best.pth \
+  --classifier-mode concat
+```
+
+## 11. 一键跑完整流程
+
+完整流程脚本会按顺序完成：
+
+1. 联合缓存预处理
+2. band-power 计算
+3. 联合预训练
+4. 目标数据集缓存预处理
+5. LOSO 微调
+6. 汇总 `loso_finetune_summary.csv`
+
+### 11.1 Windows
+
+```powershell
+.\scripts\run_pretrain_and_finetune.ps1 `
+  -PretrainDatasets ds002336,ds002338,ds002739 `
+  -TargetDataset ds002338
+```
+
+常用附加参数：
+
+- `-SkipPretrain`
+- `-SkipFinetune`
+- `-TestOnly`
+- `-GpuCount 1`
+- `-GpuIds 0`
+- `-PretrainEpochs 30`
+- `-FinetuneEpochs 30`
+- `-PretrainBatchSize 16`
+- `-FinetuneBatchSize 16`
+
+### 11.2 Linux
+
+```bash
+./scripts_linux/run_pretrain_and_finetune.sh \
+  --pretrain-datasets ds002336,ds002338,ds002739 \
+  --target-dataset ds002338
+```
+
+常用附加参数：
+
+- `--skip-pretrain`
+- `--skip-finetune`
+- `--test-only`
+- `--gpu-count 1`
+- `--gpu-ids 0`
+- `--pretrain-epochs 30`
+- `--finetune-epochs 30`
+- `--pretrain-batch-size 16`
+- `--finetune-batch-size 16`
+
+## 12. Optuna 自动搜索
+
+主入口：
+
+- `run_optuna_search.py`
+
+当前仓库同时提供：
+
+- Windows 配置：`configs/optuna_*.yaml`
+- Linux 配置：`configs/optuna_*_linux.yaml`
+
+### 12.1 Windows
+
+```powershell
+python .\run_optuna_search.py --study-config configs\optuna_ds002338.yaml --mode full
+```
+
+```powershell
+python .\run_optuna_search.py --study-config configs\optuna_ds002338.yaml --mode finetune_only
+```
+
+```powershell
+python .\run_optuna_search.py --study-config configs\optuna_ds002338.yaml --mode pretrain_only
+```
+
+### 12.2 Linux
+
+```bash
+python run_optuna_search.py --study-config configs/optuna_ds002338_linux.yaml --mode full
+```
+
+```bash
+python run_optuna_search.py --study-config configs/optuna_ds002338_linux.yaml --mode finetune_only
+```
+
+```bash
+python run_optuna_search.py --study-config configs/optuna_ds002338_linux.yaml --mode pretrain_only
+```
+
+说明：
+
+- `full` 会跑预训练和微调
+- `finetune_only` 会跳过预训练
+- `pretrain_only` 会跳过微调
+
+如果你不想让 Optuna 联合预训练用到全部数据集，需要改对应 `optuna_*.yaml` 里的：
+
+- Windows: `study.static_args -> -PretrainDatasets`
+- Linux: `study.static_args -> --pretrain-datasets`
+
+例如：
+
+```yaml
+study:
+  static_args:
+    - --target-dataset
+    - ds002338
+    - --pretrain-datasets
+    - ds002338
+```
+
+## 13. Baseline 说明
+
+当前 EEG baseline 统一在：
+
+- `mmcontrast/baselines/eeg_baseline.py`
+
+支持：
+
+- `svm`
+- `labram`
+- `cbramod`
+- `eeg_deformer`
+- `eegnet`
+- `conformer`
+- `tsception`
+
+说明：
+
+- foundation baseline 主要是 `labram` 和 `cbramod`
+- 传统 baseline 自带分类头
+- `labram` 已改成按输入动态适配，不再写死成固定通道数
+- 初始化日志会打印当前原始 EEG 通道数和公共通道重叠信息
+
+## 14. 主要输出文件
+
+### 14.1 预处理输出
+
+- `cache/joint_contrastive/manifest_all.csv`
+- `cache/joint_contrastive/eeg_channels_target.csv`
+- `cache/joint_contrastive/subjects/<dataset>_<subject>/band_power.npy`
+- `cache/<dataset>/loso_subjectwise/fold_*/manifest_train.csv`
+- `cache/<dataset>/loso_subjectwise/fold_*/manifest_val.csv`
+- `cache/<dataset>/loso_subjectwise/fold_*/manifest_test.csv`
+
+### 14.2 训练输出
+
+- `outputs/joint_contrastive/contrastive/checkpoints/best.pth`
+- `outputs/joint_contrastive/contrastive/final_metrics.json`
+- `outputs/<dataset>/finetune/fold_*/test_metrics.json`
+- `outputs/<dataset>/finetune/loso_finetune_summary.csv`
+- `pretrained_weights/contrastive_best.pth`

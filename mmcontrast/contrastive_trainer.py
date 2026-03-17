@@ -65,6 +65,8 @@ class ContrastiveTrainer:
                 f"pin_memory={runtime['pin_memory']}, "
                 f"cudnn_benchmark={runtime['cudnn_benchmark']}"
             )
+            # if getattr(self.model, "initialization_summary", ""):
+            #     print(self.model.initialization_summary)
             print(f"Model params: total={total_params:,}, trainable={trainable_params:,}")
             # if frozen_params:
             #     frozen_total = sum(item[1] for item in frozen_params)

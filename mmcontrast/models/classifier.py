@@ -7,6 +7,7 @@ from pathlib import Path
 from ..baselines import EEGBaselineModel
 from ..checkpoint_utils import extract_state_dict, filter_compatible_state_dict, load_checkpoint_file, strip_prefixes
 from .eeg_cbramod_adapter import EEGCBraModAdapter
+from .eeg_channel_summary import build_eeg_channel_summary
 from .fmri_adapter import FMRINeuroSTORMAdapter
 from .multimodal_model import EEGfMRIContrastiveModel
 
@@ -33,6 +34,7 @@ class EEGfMRIClassifier(nn.Module):
         eeg_cfg = cfg["eeg_model"]
         fmri_cfg = cfg["fmri_model"]
         data_cfg = cfg["data"]
+        eeg_channel_summary = build_eeg_channel_summary(data_cfg)
 
         self.fusion = str(finetune_cfg.get("fusion", "eeg_only"))
         baseline_cfg = dict(finetune_cfg.get("eeg_baseline", {}))
@@ -86,6 +88,8 @@ class EEGfMRIClassifier(nn.Module):
 
             category = "foundation" if self.eeg_encoder.is_foundation_model() else "traditional"
             summary_parts = [f"EEG baseline: {model_name} (category={category})."]
+            if eeg_channel_summary:
+                summary_parts.append(eeg_channel_summary)
             baseline_checkpoint_path = str(baseline_cfg.get("checkpoint_path", "")).strip()
             baseline_load_pretrained = bool(baseline_cfg.get("load_pretrained_weights", True))
             if category == "foundation":
@@ -95,12 +99,6 @@ class EEGfMRIClassifier(nn.Module):
                     summary_parts.append("Baseline pretrained loading enabled, but no checkpoint path was provided.")
                 else:
                     summary_parts.append("Baseline pretrained loading disabled.")
-                mapped_common_channels = getattr(getattr(self.eeg_encoder, "model", None), "common_channel_match_count", None)
-                common_channel_total = getattr(getattr(self.eeg_encoder, "model", None), "common_channel_total_count", None)
-                if mapped_common_channels is not None and common_channel_total is not None:
-                    summary_parts.append(
-                        f"LaBraM common-channel mapping matched {mapped_common_channels}/{common_channel_total} channels."
-                    )
                 dropped_channels = getattr(getattr(self.eeg_encoder, "model", None), "dropped_channel_names", None)
                 if dropped_channels:
                     dropped_text = ", ".join(dropped_channels[:8])
@@ -139,6 +137,8 @@ class EEGfMRIClassifier(nn.Module):
                     self.initialization_summary = (
                         "Finetune init: EEG-only finetune without checkpoint; using random EEG encoder initialization."
                     )
+                if eeg_channel_summary:
+                    self.initialization_summary = f"{self.initialization_summary} {eeg_channel_summary}"
             elif self.fusion == "fmri_only":
                 self.fmri_encoder = FMRINeuroSTORMAdapter(**fmri_cfg)
                 if checkpoint_path:
@@ -160,6 +160,8 @@ class EEGfMRIClassifier(nn.Module):
                     self.initialization_summary = (
                         "Finetune init: fMRI-only finetune without checkpoint; using random fMRI encoder initialization."
                     )
+                if eeg_channel_summary:
+                    self.initialization_summary = f"{self.initialization_summary} {eeg_channel_summary}"
             else:
                 self.backbone = EEGfMRIContrastiveModel(cfg)
                 if checkpoint_path:
@@ -187,6 +189,8 @@ class EEGfMRIClassifier(nn.Module):
                     self.initialization_summary = (
                         "Finetune init: no existing checkpoint provided; using random initialization and training from scratch."
                     )
+                if getattr(self.backbone, "initialization_summary", ""):
+                    self.initialization_summary = f"{self.initialization_summary} {self.backbone.initialization_summary}"
 
         if bool(finetune_cfg.get("freeze_encoders", False)):
             if self.use_eeg_baseline:

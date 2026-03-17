@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .eeg_cbramod_adapter import EEGCBraModAdapter
+from .eeg_channel_summary import build_eeg_channel_summary
 from .fmri_adapter import FMRINeuroSTORMAdapter
 
 
@@ -26,6 +27,10 @@ class EEGfMRIContrastiveModel(nn.Module):
         proj_dim = int(train_cfg.get("projection_dim", 256))
         self.eeg_proj = nn.Linear(self.eeg_encoder.feature_dim, proj_dim)
         self.fmri_proj = nn.Linear(self.fmri_encoder.feature_dim, proj_dim)
+        channel_summary = build_eeg_channel_summary(cfg.get("data", {}))
+        self.initialization_summary = "Contrastive model: EEG encoder=cbramod, fMRI encoder=neurostorm."
+        if channel_summary:
+            self.initialization_summary = f"{self.initialization_summary} {channel_summary}"
 
     def encode_eeg_feature(self, eeg: torch.Tensor) -> torch.Tensor:
         """提取 EEG 模态特征，不做投影归一化。"""

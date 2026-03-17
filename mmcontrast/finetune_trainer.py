@@ -294,6 +294,19 @@ class FinetuneTrainer:
         self.model.eeg_encoder.fit(train_x, train_y)
 
         val_metrics = self.evaluate(self.val_loader, split_name="val")
+        train_class_counts = {
+            str(int(label.item())): int(count.item())
+            for label, count in zip(*torch.unique(train_y, return_counts=True))
+        }
+        svm_summary = {
+            "train_sample_count": int(train_x.shape[0]),
+            "feature_dim": int(train_x.shape[1]) if train_x.ndim == 2 else int(train_x[0].numel()),
+            "train_class_counts": train_class_counts,
+            "selection_metric": self.selection_metric,
+            "model_summary": self.model.eeg_encoder.summary(),
+        }
+        if val_metrics is not None:
+            svm_summary["val_metrics"] = val_metrics
         final_metrics = {
             "epochs": 1,
             "completed_epochs": 1,
@@ -312,6 +325,8 @@ class FinetuneTrainer:
             test_metrics = self.evaluate(self.test_loader, split_name="test", save_logits=False)
             if test_metrics is not None:
                 final_metrics["test_metrics"] = test_metrics
+                svm_summary["test_metrics"] = test_metrics
+        self.save_metrics("svm_summary.json", svm_summary)
         self.save_metrics("final_metrics.json", final_metrics)
         cleanup_distributed()
 

@@ -205,7 +205,7 @@ class PairedEEGfMRIDataset(Dataset):
         elif self.preparer.require_eeg:
             raise ValueError("EEG path is required for this dataset but missing in manifest row.")
 
-        if "fmri_path" in row and not pd.isna(row["fmri_path"]):
+        if self.preparer.require_fmri and "fmri_path" in row and not pd.isna(row["fmri_path"]):
             fmri_path = self.preparer.resolve_path(str(row["fmri_path"]))
             item["fmri"] = self.preparer.prepare_fmri(self.preparer.load_array(fmri_path), fmri_path)
         elif self.preparer.require_fmri:
@@ -236,14 +236,10 @@ class PairedEEGfMRIDataset(Dataset):
             if "eeg" not in pack:
                 raise ValueError(f"Subject pack missing EEG array: {pack_path}")
             item["eeg"] = self.preparer.prepare_eeg(pack["eeg"][local_idx], pack_path)
-        elif "eeg" in pack:
-            item["eeg"] = self.preparer.prepare_eeg(pack["eeg"][local_idx], pack_path)
 
         if self.preparer.require_fmri:
             if "fmri" not in pack:
                 raise ValueError(f"Subject pack missing fMRI array: {pack_path}")
-            item["fmri"] = self.preparer.prepare_fmri(pack["fmri"][local_idx], pack_path)
-        elif "fmri" in pack:
             item["fmri"] = self.preparer.prepare_fmri(pack["fmri"][local_idx], pack_path)
 
         if "labels" in pack:

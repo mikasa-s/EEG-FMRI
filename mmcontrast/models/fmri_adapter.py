@@ -27,6 +27,7 @@ class FMRINeuroSTORMAdapter(nn.Module):
         **_: object,
     ) -> None:
         super().__init__()
+        self.initialization_summary = "fMRI backbone init: random initialization."
         try:
             from ..backbones.fmri_neurostorm import NeuroSTORM
         except ModuleNotFoundError as exc:
@@ -56,11 +57,19 @@ class FMRINeuroSTORMAdapter(nn.Module):
         self.feature_dim = int(embed_dim) * (int(c_multiplier) ** (len(tuple(depths)) - 1))
 
         if checkpoint_path:
-            load_compatible_state_dict(
+            report = load_compatible_state_dict(
                 self.backbone,
                 checkpoint_path,
                 preferred_keys=("state_dict", "model", "backbone", "encoder"),
                 prefixes=("module.",),
+            )
+            self.initialization_summary = (
+                "fMRI backbone init: loaded checkpoint "
+                f"{checkpoint_path} "
+                f"(loaded={int(report.get('loaded_count', 0))}, "
+                f"shape_mismatch={int(report.get('skipped_shape_count', 0))}, "
+                f"missing_keys={int(report.get('missing_in_checkpoint_count', 0))}, "
+                f"unexpected_keys={int(report.get('skipped_missing_count', 0))})."
             )
 
         if freeze_backbone:

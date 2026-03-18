@@ -23,6 +23,7 @@ class EEGCBraModAdapter(nn.Module):
         freeze_backbone: bool = False,
     ) -> None:
         super().__init__()
+        self.initialization_summary = "EEG backbone init: random initialization."
         # 这里直接实例化本地 vendored 的 CBraMod 骨干。
         self.backbone = CBraMod(
             in_dim=in_dim,
@@ -37,11 +38,19 @@ class EEGCBraModAdapter(nn.Module):
 
         if checkpoint_path:
             # 只加载名字和形状都匹配的参数，避免不同导出格式导致失败。
-            load_compatible_state_dict(
+            report = load_compatible_state_dict(
                 self.backbone,
                 checkpoint_path,
                 preferred_keys=("state_dict", "model"),
                 prefixes=("module.",),
+            )
+            self.initialization_summary = (
+                "EEG backbone init: loaded checkpoint "
+                f"{checkpoint_path} "
+                f"(loaded={int(report.get('loaded_count', 0))}, "
+                f"shape_mismatch={int(report.get('skipped_shape_count', 0))}, "
+                f"missing_keys={int(report.get('missing_in_checkpoint_count', 0))}, "
+                f"unexpected_keys={int(report.get('skipped_missing_count', 0))})."
             )
 
         if freeze_backbone:

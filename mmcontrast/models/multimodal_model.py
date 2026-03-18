@@ -39,6 +39,12 @@ class EEGfMRIContrastiveModel(nn.Module):
         self.initialization_summary = "Contrastive model: EEG encoder=cbramod(shared/private), fMRI encoder=neurostorm(shared)."
         if channel_summary:
             self.initialization_summary = f"{self.initialization_summary} {channel_summary}"
+        eeg_init_summary = str(getattr(self.eeg_encoder.backbone, "initialization_summary", "")).strip()
+        fmri_init_summary = str(getattr(self.fmri_encoder.backbone, "initialization_summary", "")).strip()
+        if eeg_init_summary:
+            self.initialization_summary = f"{self.initialization_summary} {eeg_init_summary}"
+        if fmri_init_summary:
+            self.initialization_summary = f"{self.initialization_summary} {fmri_init_summary}"
 
     def encode_eeg_outputs(self, eeg: torch.Tensor) -> dict[str, torch.Tensor]:
         return self.eeg_encoder(eeg)

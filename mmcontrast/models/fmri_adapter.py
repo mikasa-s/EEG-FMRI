@@ -61,7 +61,7 @@ class FMRINeuroSTORMAdapter(nn.Module):
                 self.backbone,
                 checkpoint_path,
                 preferred_keys=("state_dict", "model", "backbone", "encoder"),
-                prefixes=("module.",),
+                prefixes=("module.", "model.", "backbone.", "encoder."),
             )
             self.initialization_summary = (
                 "fMRI backbone init: loaded checkpoint "

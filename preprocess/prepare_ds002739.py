@@ -128,8 +128,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--window-sec",
         type=float,
-        default=8.0,
-        help="Maximum window length in seconds. Actual windows are truncated to avoid crossing the next tracked event boundary.",
+        default=4.0,
+        help="Fixed window length in seconds taken from each stimulus onset.",
     )
     parser.add_argument(
         "--eeg-window-sec",
@@ -147,13 +147,13 @@ def parse_args() -> argparse.Namespace:
         "--window-margin-sec",
         type=float,
         default=0.0,
-        help="Optional safety margin removed from the next-event boundary when computing the usable window.",
+        help="Unused legacy option kept for CLI compatibility.",
     )
     parser.add_argument(
         "--min-window-sec",
         type=float,
-        default=1.0,
-        help="Minimum usable window length. Shorter windows are skipped.",
+        default=4.0,
+        help="Minimum required fixed window length in seconds. Trials shorter than this are skipped.",
     )
     add_atlas_args(parser)
     add_common_fmri_args(
@@ -385,12 +385,8 @@ def estimate_eeg_fmri_offset_sec(eeg_trials: pd.DataFrame, fmri_events: pd.DataF
     return float(np.median(eeg_tstim[:count] - fmri_tstim[:count]))
 
 
-def compute_event_window_sec(onsets_sec: np.ndarray, event_index: int, max_window_sec: float, margin_sec: float, min_window_sec: float) -> float | None:
-    onset = float(onsets_sec[event_index])
-    usable = float(max_window_sec)
-    if event_index + 1 < len(onsets_sec):
-        next_onset = float(onsets_sec[event_index + 1])
-        usable = min(usable, max(0.0, next_onset - onset - margin_sec))
+def compute_fixed_window_sec(window_sec: float, min_window_sec: float) -> float | None:
+    usable = float(window_sec)
     if usable < min_window_sec:
         return None
     return usable
@@ -599,18 +595,12 @@ def prepare_subject(
             trial_type = "dot_stim_validtrials"
             label = int(trial_row["label"])
             label_name = str(trial_row["label_name"])
-            eeg_window_length_sec = compute_event_window_sec(
-                aligned_eeg_onsets,
-                event_index=event_index,
-                max_window_sec=float(args.eeg_window_sec) if args.eeg_window_sec is not None else float(args.window_sec),
-                margin_sec=float(args.window_margin_sec),
+            eeg_window_length_sec = compute_fixed_window_sec(
+                window_sec=float(args.eeg_window_sec) if args.eeg_window_sec is not None else float(args.window_sec),
                 min_window_sec=float(args.min_window_sec),
             )
-            fmri_window_length_sec = compute_event_window_sec(
-                fmri_onsets,
-                event_index=event_index,
-                max_window_sec=float(args.fmri_window_sec) if args.fmri_window_sec is not None else float(args.window_sec),
-                margin_sec=float(args.window_margin_sec),
+            fmri_window_length_sec = compute_fixed_window_sec(
+                window_sec=float(args.fmri_window_sec) if args.fmri_window_sec is not None else float(args.window_sec),
                 min_window_sec=float(args.min_window_sec),
             )
             if eeg_window_length_sec is None or fmri_window_length_sec is None:

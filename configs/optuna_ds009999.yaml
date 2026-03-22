@@ -83,6 +83,22 @@ parameters:
       - config: finetune
         key: finetune.hidden_dim
 
+  n_layer:
+    suggest: categorical
+    choices: [6, 8, 10, 12]
+    target: config
+    config_updates:
+      - config: finetune
+        key: eeg_model.n_layer
+
+  dropout:
+    suggest: categorical
+    choices: [0.1, 0.2, 0.3, 0.5]
+    target: config
+    config_updates:
+      - config: finetune
+        key: finetune.dropout
+
   grad_clip:
     suggest: categorical
     choices: [0.0, 0.5, 1.0, 5.0]
@@ -109,7 +125,7 @@ parameters:
 
 parameter_groups:
   pretrain: [train_epochs, pretrain_batch_size, pretrain_lr, weight_decay, min_lr, grad_clip]
-  finetune: [train_epochs, finetune_batch_size, finetune_lr, weight_decay, min_lr, hidden_dim, grad_clip, early_stop_patience]
+  finetune: [train_epochs, finetune_batch_size, finetune_lr, weight_decay, min_lr, hidden_dim, n_layer, dropout, grad_clip, early_stop_patience]
 
 modes:
   finetune_only:

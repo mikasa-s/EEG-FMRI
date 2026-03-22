@@ -15,7 +15,7 @@ data:
   preload_dataset: false
   eeg_channel_subset: auto
   eeg_channel_target_manifest: cache/ds002739/eeg_channels_target.csv
-  expected_eeg_shape: [40, 8, 200]
+  expected_eeg_shape: [40, 4, 200]
   expected_fmri_shape: [48, 48, 48, 1]
   normalize_eeg: true
   normalize_fmri: true
@@ -34,7 +34,7 @@ eeg_model:
   out_dim: 200
   d_model: 200
   dim_feedforward: 800
-  seq_len: 8
+  seq_len: 4
   shared_dim: 256
   private_dim: 256
   band_power_dim: 5
@@ -71,7 +71,7 @@ finetune:
     model_name: cbramod
     num_classes: 2
     num_channels: 40
-    num_timepoints: 200
+    num_timepoints: 800
     load_pretrained_weights: false
     checkpoint_path: ""
   hidden_dim: 256

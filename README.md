@@ -1,5 +1,19 @@
 # EEG-fMRI-Contrastive
 
+## 环境约定
+
+运行任何脚本前，请先手动激活你自己的 conda/mamba 环境。仓库内脚本不会强行写死环境名。
+
+```bash
+conda activate <your-mamba-env>
+```
+
+Windows PowerShell 同理：
+
+```powershell
+conda activate <your-mamba-env>
+```
+
 本仓库用于 EEG-fMRI 联合对比学习预训练，以及 EEG-only 分类微调。
 
 当前支持两类任务：
@@ -19,6 +33,7 @@
   - traditional：`svm`、`eeg_deformer`、`eegnet`、`conformer`、`tsception`
   - foundation：`labram`、`cbramod`
 - 微调模型按 `macro_f1` 选择最佳 checkpoint
+- 分类评估默认输出 `accuracy`、`macro_f1`
 
 `ds009999` 是仓库内部对 `SEED` 的命名，只用于 EEG-only 微调，不参与 EEG-fMRI 联合预训练。
 
@@ -268,13 +283,29 @@ python run_finetune.py --config configs\finetune_ds009999.yaml --force-cpu --set
 python run_finetune.py --config configs\finetune_ds009999.yaml --train-manifest cache\ds009999\loso_subjectwise\fold_ds009999_sub01\manifest_train.csv --val-manifest cache\ds009999\loso_subjectwise\fold_ds009999_sub01\manifest_val.csv --test-manifest cache\ds009999\loso_subjectwise\fold_ds009999_sub01\manifest_test.csv --root-dir cache\ds009999 --output-dir outputs\ds009999\finetune\fold_ds009999_sub01
 ```
 
-### 13. Optuna 搜索 ds002338
+### 13. 混淆矩阵
+
+`run_finetune.py` 只要拿到了 `test_manifest`，测试阶段就会自动输出混淆矩阵，不需要额外参数。最小用法：
+
+```powershell
+python run_finetune.py --config configs\finetune_ds002338.yaml
+```
+
+如果要对已有 LOSO 权重直接做离线复现，并输出每个 fold 和总 LOSO 的混淆矩阵，可以运行：
+
+```powershell
+python run_offline_loso_eval.py --dataset-name ds009999 --config configs\finetune_ds009999.yaml --checkpoints-root outputs\ds009999\finetune --output-dir outputs\ds009999\offline_eval
+```
+
+要求 `--checkpoints-root` 下存在 `fold_*\checkpoints\best.pth`。
+
+### 14. Optuna 搜索 ds002338
 
 ```powershell
 python run_optuna_search.py --study-config configs\optuna_ds002338.yaml --mode full
 ```
 
-### 14. Optuna 搜索 ds009999
+### 15. Optuna 搜索 ds009999
 
 `ds009999` 只支持 finetune-only：
 
@@ -282,7 +313,7 @@ python run_optuna_search.py --study-config configs\optuna_ds002338.yaml --mode f
 python run_optuna_search.py --study-config configs\optuna_ds009999.yaml --mode finetune_only
 ```
 
-### 15. 预训练结果离线可视化
+### 16. 预训练结果离线可视化
 
 ```powershell
 python .\run_visualize_contrastive.py --config configs\train_joint_contrastive.yaml --checkpoint outputs\joint_contrastive\contrastive\checkpoints\best.pth --output-dir outputs\visualizations\contrastive --batch-size 32 --tsne-max-points 2000 --heatmap-max-points 128
@@ -391,22 +422,232 @@ python run_finetune.py --config configs/finetune_ds009999.yaml --force-cpu --set
 python run_finetune.py --config configs/finetune_ds009999.yaml --train-manifest cache/ds009999/loso_subjectwise/fold_ds009999_sub01/manifest_train.csv --val-manifest cache/ds009999/loso_subjectwise/fold_ds009999_sub01/manifest_val.csv --test-manifest cache/ds009999/loso_subjectwise/fold_ds009999_sub01/manifest_test.csv --root-dir cache/ds009999 --output-dir outputs/ds009999/finetune/fold_ds009999_sub01
 ```
 
-### 13. Optuna 搜索 ds002338
+### 13. 混淆矩阵
+
+`run_finetune.py` 只要拿到了 `test_manifest`，测试阶段就会自动输出混淆矩阵，不需要额外参数。最小用法：
+
+```bash
+python run_finetune.py --config configs/finetune_ds002338.yaml
+```
+
+如果要对已有 LOSO 权重直接做离线复现，并输出每个 fold 和总 LOSO 的混淆矩阵，可以运行：
+
+```bash
+python run_offline_loso_eval.py --dataset-name ds009999 --config configs/finetune_ds009999.yaml --checkpoints-root outputs/ds009999/finetune --output-dir outputs/ds009999/offline_eval
+```
+
+要求 `--checkpoints-root` 下存在 `fold_*/checkpoints/best.pth`。
+
+### 14. Optuna 搜索 ds002338
 
 ```bash
 python run_optuna_search.py --study-config configs/optuna_ds002338_linux.yaml --mode full
 ```
 
-### 14. Optuna 搜索 ds009999
+### 15. Optuna 搜索 ds009999
 
 ```bash
 python run_optuna_search.py --study-config configs/optuna_ds009999_linux.yaml --mode finetune_only
 ```
 
-### 15. 预训练结果离线可视化
+### 16. 预训练结果离线可视化
 
 ```bash
 python run_visualize_contrastive.py --config configs/train_joint_contrastive.yaml --checkpoint outputs/joint_contrastive/contrastive/checkpoints/best.pth --output-dir outputs/visualizations/contrastive --batch-size 32 --tsne-max-points 2000 --heatmap-max-points 128
+```
+
+## 脚本索引与用法
+
+下面只列脚本入口。执行前请先手动 `conda activate <your-mamba-env>`。
+
+### 1. 核心 Python 入口
+
+`run_train.py`
+
+```bash
+python run_train.py --config configs/train_joint_contrastive.yaml
+```
+
+`run_finetune.py`
+
+```bash
+```
+
+`run_optuna_search.py`
+
+```bash
+```
+
+`run_visualize_contrastive.py`
+
+```bash
+python run_visualize_contrastive.py --config configs/train_joint_contrastive.yaml --checkpoint outputs/joint_contrastive/contrastive/checkpoints/best.pth --output-dir outputs/visualizations/contrastive
+```
+
+`run_offline_loso_eval.py`
+
+```bash
+```
+
+### 2. Linux 脚本
+
+`scripts_linux/prepare_joint_contrastive.sh`
+
+```bash
+./scripts_linux/prepare_joint_contrastive.sh --ds002336-root ../ds002336 --ds002338-root ../ds002338 --ds002739-root ../ds002739 --output-root cache/joint_contrastive
+```
+
+`scripts_linux/ds00233x/prepare_ds00233x.sh`
+
+```bash
+./scripts_linux/ds00233x/prepare_ds00233x.sh --dataset-name ds002336 --ds-root ../ds002336 --output-root cache/ds002336
+```
+
+`scripts_linux/ds00233x/prepare_ds00233x_spm.sh`
+
+```bash
+./scripts_linux/ds00233x/prepare_ds00233x_spm.sh --dataset-name ds002336 --ds-root ../ds002336
+```
+
+`scripts_linux/ds002739/prepare_ds002739.sh`
+
+```bash
+./scripts_linux/ds002739/prepare_ds002739.sh --ds-root ../ds002739 --output-root cache/ds002739
+```
+
+`scripts_linux/ds009999/prepare_ds009999.sh`
+
+```bash
+./scripts_linux/ds009999/prepare_ds009999.sh --ds-root ../SEED --output-root cache/ds009999 --split-mode loso
+```
+
+
+```bash
+```
+
+`scripts_linux/run_pretrain_and_finetune.sh`
+
+```bash
+./scripts_linux/run_pretrain_and_finetune.sh --target-dataset ds002739 --joint-train-config configs/train_joint_contrastive.yaml --ds002739-finetune-config configs/finetune_ds002739.yaml
+```
+
+`scripts_linux/run_optuna_pretrain_and_finetune.sh`
+
+```bash
+./scripts_linux/run_optuna_pretrain_and_finetune.sh --target-dataset ds002739 --finetune-config configs/finetune_ds002739.yaml --output-root outputs/optuna_run
+```
+
+`scripts_linux/run_finetune_ds009999.sh`
+
+```bash
+./scripts_linux/run_finetune_ds009999.sh --finetune-config configs/finetune_ds009999.yaml --cache-root cache/ds009999 --output-root outputs/ds009999
+```
+
+
+```bash
+```
+
+`scripts_linux/run_all_eeg_baselines.sh`
+
+```bash
+./scripts_linux/run_all_eeg_baselines.sh --config configs/finetune_ds002336.yaml --models svm,labram,cbramod,eeg_deformer,eegnet,conformer,tsception --output-root outputs/finetune_ds002336_all_baselines
+```
+
+`scripts_linux/run_finetune_from_pretrain_trials.sh`
+
+```bash
+```
+
+### 3. Windows 脚本
+
+`scripts/prepare_joint_contrastive.ps1`
+
+```powershell
+.\scripts\prepare_joint_contrastive.ps1 -Ds002336Root ..\ds002336 -Ds002338Root ..\ds002338 -Ds002739Root ..\ds002739 -OutputRoot cache\joint_contrastive
+```
+
+`scripts/ds00233x/prepare_ds00233x.ps1`
+
+```powershell
+.\scripts\ds00233x\prepare_ds00233x.ps1 -DatasetName ds002336 -DsRoot ..\ds002336 -OutputRoot cache\ds002336
+```
+
+`scripts/ds00233x/prepare_ds00233x_spm.ps1`
+
+```powershell
+.\scripts\ds00233x\prepare_ds00233x_spm.ps1 -DatasetName ds002336 -DsRoot ..\ds002336
+```
+
+`scripts/ds002739/prepare_ds002739.ps1`
+
+```powershell
+.\scripts\ds002739\prepare_ds002739.ps1 -DsRoot ..\ds002739 -OutputRoot cache\ds002739
+```
+
+`scripts/ds009999/prepare_ds009999.ps1`
+
+```powershell
+.\scripts\ds009999\prepare_ds009999.ps1 -DsRoot ..\SEED -OutputRoot cache\ds009999 -SplitMode loso
+```
+
+
+```powershell
+```
+
+`scripts/run_pretrain_and_finetune.ps1`
+
+```powershell
+.\scripts\run_pretrain_and_finetune.ps1 -TargetDataset ds002739 -JointTrainConfig configs\train_joint_contrastive.yaml -Ds002739FinetuneConfig configs\finetune_ds002739.yaml
+```
+
+`scripts/run_optuna_pretrain_and_finetune.ps1`
+
+```powershell
+.\scripts\run_optuna_pretrain_and_finetune.ps1 -TargetDataset ds002739 -FinetuneConfig configs\finetune_ds002739.yaml -OutputRoot outputs\optuna_run
+```
+
+`scripts/run_finetune_ds009999.ps1`
+
+```powershell
+.\scripts\run_finetune_ds009999.ps1 -FinetuneConfig configs\finetune_ds009999.yaml -CacheRoot cache\ds009999 -OutputRoot outputs\ds009999
+```
+
+
+```powershell
+```
+
+### 4. Optuna 配置入口
+
+`configs/optuna_ds002338.yaml`
+
+```powershell
+python run_optuna_search.py --study-config configs\optuna_ds002338.yaml --mode full
+```
+
+`configs/optuna_ds009999.yaml`
+
+```powershell
+python run_optuna_search.py --study-config configs\optuna_ds009999.yaml --mode finetune_only
+```
+
+
+```powershell
+```
+
+`configs/optuna_ds002338_linux.yaml`
+
+```bash
+python run_optuna_search.py --study-config configs/optuna_ds002338_linux.yaml --mode full
+```
+
+`configs/optuna_ds009999_linux.yaml`
+
+```bash
+python run_optuna_search.py --study-config configs/optuna_ds009999_linux.yaml --mode finetune_only
+```
+
+
+```bash
 ```
 
 ## 结果文件说明
@@ -425,11 +666,17 @@ python run_visualize_contrastive.py --config configs/train_joint_contrastive.yam
 - `checkpoints/best.pth`
 - `val_metrics.json`
 - `test_metrics.json`
+- `test_confusion_matrix.png`
+- `test_confusion_matrix.svg`
+- `test_confusion_matrix.json`
+- `test_logits.csv`
 - `svm_summary.json`（仅 `svm` baseline）
 
 LOSO 汇总一般写到：
 
 - `loso_finetune_summary.csv`
+- `confusion_matrix_<dataset_name>_loso.png`（离线 LOSO 总混淆矩阵）
+- `confusion_matrix_<dataset_name>_loso.svg`（离线 LOSO 总混淆矩阵矢量图）
 - `baseline_summary.csv`（单个 baseline 的全 fold 汇总）
 - `all_baselines_summary.csv`（批量 baseline 的总汇总，Linux 脚本生成）
 

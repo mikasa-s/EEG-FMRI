@@ -192,3 +192,89 @@ def save_finetune_loss_curve(
         "min_train_loss": float(min(train_loss)),
         "min_val_loss": float(min(val_loss)) if val_loss else float("nan"),
     }
+
+
+def save_confusion_matrix(
+    labels: np.ndarray,
+    preds: np.ndarray,
+    output_path: str | Path,
+    class_names: list[str] | None = None,
+    title: str | None = None,
+    normalize: bool = False,
+) -> dict[str, Any]:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise ModuleNotFoundError(
+            "Confusion matrix visualization requires matplotlib."
+        ) from exc
+
+    labels = np.asarray(labels, dtype=np.int64).reshape(-1)
+    preds = np.asarray(preds, dtype=np.int64).reshape(-1)
+    if labels.size == 0 or preds.size == 0:
+        return {"saved": False, "reason": "empty_labels_or_preds"}
+    if labels.shape != preds.shape:
+        raise ValueError(f"labels and preds must have the same shape, got {labels.shape} and {preds.shape}")
+
+    num_classes = int(max(labels.max(initial=0), preds.max(initial=0)) + 1)
+    matrix = np.zeros((num_classes, num_classes), dtype=np.int64)
+    for label, pred in zip(labels.tolist(), preds.tolist()):
+        matrix[int(label), int(pred)] += 1
+
+    display_matrix = matrix.astype(np.float32)
+    if normalize:
+        row_sums = display_matrix.sum(axis=1, keepdims=True)
+        valid_rows = row_sums.squeeze(-1) > 0
+        display_matrix[valid_rows] = display_matrix[valid_rows] / row_sums[valid_rows]
+
+    if class_names is None:
+        class_names = [str(index) for index in range(num_classes)]
+    else:
+        class_names = [str(name) for name in class_names]
+        if len(class_names) < num_classes:
+            class_names = class_names + [str(index) for index in range(len(class_names), num_classes)]
+
+    output = Path(output_path)
+    _ensure_parent(output)
+    fig, ax = plt.subplots(figsize=(7, 6), dpi=160)
+    im = ax.imshow(display_matrix, cmap="Blues", aspect="auto")
+    ax.set_title(title or "Confusion Matrix")
+    ax.set_xlabel("Predicted label")
+    ax.set_ylabel("True label")
+    ax.set_xticks(np.arange(num_classes))
+    ax.set_yticks(np.arange(num_classes))
+    ax.set_xticklabels(class_names, rotation=0, ha="center")
+    ax.set_yticklabels(class_names)
+
+    for row in range(num_classes):
+        for col in range(num_classes):
+            value = display_matrix[row, col]
+            if normalize:
+                text_value = f"{value:.2f}"
+            else:
+                text_value = str(int(matrix[row, col]))
+            ax.text(
+                col,
+                row,
+                text_value,
+                ha="center",
+                va="center",
+                color="white" if value > display_matrix.max() * 0.5 else "black",
+                fontsize=9,
+            )
+
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig.tight_layout()
+    fig.savefig(output, bbox_inches="tight")
+    vector_output = output.with_suffix(".svg")
+    fig.savefig(vector_output, bbox_inches="tight")
+    plt.close(fig)
+    return {
+        "saved": True,
+        "path": str(output),
+        "vector_path": str(vector_output),
+        "num_classes": int(num_classes),
+        "sample_count": int(labels.size),
+        "normalized": bool(normalize),
+        "matrix": matrix.tolist(),
+    }

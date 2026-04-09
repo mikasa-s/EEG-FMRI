@@ -17,7 +17,14 @@ from .datasets import PairedEEGfMRIDataset
 from .distributed import cleanup_distributed, configure_cudnn, configure_runtime_devices, gather_tensor, init_distributed, is_dist_initialized, is_main_process, runtime_summary
 from .metrics import classification_metrics
 from .models import EEGfMRIClassifier
-from .visualization import next_indexed_output_path, save_finetune_loss_curve
+from .visualization import next_indexed_output_path, save_confusion_matrix, save_finetune_loss_curve
+
+
+DATASET_CONFUSION_TITLES = {
+    "ds002336": "XP1",
+    "ds002338": "XP2",
+    "ds009999": "SEED",
+}
 
 
 def _build_grad_scaler(enabled: bool) -> torch.amp.GradScaler | torch.cuda.amp.GradScaler:
@@ -315,6 +322,43 @@ class FinetuneTrainer:
         report["history_csv_path"] = str(history_csv_path)
         return report
 
+    def save_confusion_matrix_artifacts(self, split_name: str, logits: torch.Tensor, labels: torch.Tensor) -> None:
+        if not is_main_process():
+            return
+
+        logits_cpu = logits.detach().float().cpu()
+        labels_cpu = labels.detach().long().cpu()
+        preds_cpu = logits_cpu.argmax(dim=1)
+        unique_labels = sorted(set(labels_cpu.tolist()) | set(preds_cpu.tolist()))
+        class_names = [str(index) for index in unique_labels]
+        if len(unique_labels) == 2 and unique_labels == [0, 1]:
+            class_names = ["0", "1"]
+
+        report = save_confusion_matrix(
+            labels=labels_cpu.numpy(),
+            preds=preds_cpu.numpy(),
+            output_path=self.output_dir / f"{split_name}_confusion_matrix.png",
+            class_names=class_names,
+            title=self.resolve_confusion_title(default_title=f"{split_name.title()} Confusion Matrix"),
+            normalize=False,
+        )
+        with open(self.output_dir / f"{split_name}_confusion_matrix.json", "w", encoding="utf-8") as handle:
+            json.dump(report, handle, ensure_ascii=False, indent=2)
+
+    def resolve_confusion_title(self, default_title: str) -> str:
+        data_cfg = self.cfg.get("data", {}) if isinstance(self.cfg, dict) else {}
+        candidates = [
+            str(data_cfg.get("root_dir", "")).strip(),
+            str(data_cfg.get("train_manifest_csv", "")).strip(),
+            str(data_cfg.get("val_manifest_csv", "")).strip(),
+            str(data_cfg.get("test_manifest_csv", "")).strip(),
+        ]
+        haystack = " ".join(value.lower() for value in candidates if value)
+        for dataset_name, title in DATASET_CONFUSION_TITLES.items():
+            if dataset_name in haystack:
+                return title
+        return default_title
+
     def fit_svm_baseline(self) -> None:
         if hasattr(self.model, "module"):
             raise RuntimeError("SVM baseline does not support DDP execution.")
@@ -359,7 +403,7 @@ class FinetuneTrainer:
         if val_metrics is not None:
             final_metrics["last_val_metrics"] = val_metrics
         if self.test_loader is not None:
-            test_metrics = self.evaluate(self.test_loader, split_name="test", save_logits=False)
+            test_metrics = self.evaluate(self.test_loader, split_name="test", save_logits=True)
             if test_metrics is not None:
                 final_metrics["test_metrics"] = test_metrics
                 svm_summary["test_metrics"] = test_metrics
@@ -518,6 +562,7 @@ class FinetuneTrainer:
             metrics["loss"] = float("nan")
             if save_logits:
                 self.save_logits_artifacts(split_name=split_name, logits=logits, labels=labels)
+                self.save_confusion_matrix_artifacts(split_name=split_name, logits=logits, labels=labels)
             return metrics
 
         for batch in loader:
@@ -538,6 +583,7 @@ class FinetuneTrainer:
 
         if save_logits:
             self.save_logits_artifacts(split_name=split_name, logits=logits, labels=labels)
+            self.save_confusion_matrix_artifacts(split_name=split_name, logits=logits, labels=labels)
 
         return metrics
 
@@ -549,7 +595,7 @@ class FinetuneTrainer:
             raise FileNotFoundError(f"Finetune checkpoint not found for test_only: {self.eval_checkpoint_path}")
 
         self.load_checkpoint(self.eval_checkpoint_path)
-        test_metrics = self.evaluate(self.test_loader, split_name="test", save_logits=False)
+        test_metrics = self.evaluate(self.test_loader, split_name="test", save_logits=True)
         payload = {
             "mode": "test_only",
             "checkpoint_path": str(self.eval_checkpoint_path),
@@ -652,7 +698,7 @@ class FinetuneTrainer:
 
         if self.test_loader is not None:
             self.load_checkpoint(self.best_checkpoint_path)
-            test_metrics = self.evaluate(self.test_loader, split_name="test", save_logits=False)
+            test_metrics = self.evaluate(self.test_loader, split_name="test", save_logits=True)
             if test_metrics is not None:
                 final_metrics["test_metrics"] = test_metrics
                 self.save_metrics("test_metrics.json", test_metrics)

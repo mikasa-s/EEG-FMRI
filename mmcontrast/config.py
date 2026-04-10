@@ -271,8 +271,8 @@ class TrainConfig:
             if section_name not in self.raw:
                 raise ValueError(f"Missing required config section: {section_name}")
 
-        if pretrain_objective not in {"shared_private", "infonce", "dcca"}:
-            raise ValueError("train.pretrain_objective must be one of: shared_private, infonce, dcca")
+        if pretrain_objective not in {"shared_private", "infonce", "barlow_twins"}:
+            raise ValueError("train.pretrain_objective must be one of: shared_private, infonce, barlow_twins")
         if eeg_shared_dim <= 0 or eeg_private_dim <= 0:
             raise ValueError("eeg_model.shared_dim and eeg_model.private_dim must be positive")
         if pretrain_objective == "shared_private" and eeg_band_power_dim != 5:

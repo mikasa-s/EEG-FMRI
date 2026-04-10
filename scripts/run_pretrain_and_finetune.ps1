@@ -48,45 +48,6 @@ function Invoke-CommandOrThrow {
     }
 }
 
-function Get-MetricValue {
-    param(
-        [Parameter(Mandatory = $true)]$Metrics,
-        [Parameter(Mandatory = $true)][string]$Name
-    )
-
-    $property = $Metrics.PSObject.Properties[$Name]
-    if ($null -eq $property -or $null -eq $property.Value) {
-        return 0.0
-    }
-    return [double]$property.Value
-}
-
-function Get-MeanValue {
-    param([double[]]$Values)
-    if ($null -eq $Values -or $Values.Count -eq 0) {
-        return 0.0
-    }
-    return [double](($Values | Measure-Object -Average).Average)
-}
-
-function Get-StdValue {
-    param([double[]]$Values)
-    if ($null -eq $Values -or $Values.Count -le 1) {
-        return 0.0
-    }
-    $mean = Get-MeanValue -Values $Values
-    $sum = 0.0
-    foreach ($value in $Values) {
-        $sum += [math]::Pow(([double]$value - $mean), 2)
-    }
-    return [math]::Sqrt($sum / $Values.Count)
-}
-
-function Read-JsonFile {
-    param([Parameter(Mandatory = $true)][string]$Path)
-    return Get-Content -Path $Path -Raw | ConvertFrom-Json
-}
-
 function Test-JointCacheReady {
     param([Parameter(Mandatory = $true)][string]$CacheRoot)
 
@@ -127,53 +88,6 @@ function Test-ConfigUsesEegBaseline {
         return $false
     }
     return [bool]$config.finetune.eeg_baseline.enabled
-}
-
-function Write-FinetuneSummary {
-    param(
-        [Parameter(Mandatory = $true)][string]$FinetuneRoot,
-        [Parameter(Mandatory = $true)]$FoldNameMap
-    )
-
-    $summaryRows = @()
-    foreach ($foldDir in (Get-ChildItem -Path $FinetuneRoot -Directory | Where-Object { $_.Name -like "fold_*" } | Sort-Object Name)) {
-        $metricsPath = Join-Path $foldDir.FullName "test_metrics.json"
-        if (!(Test-Path $metricsPath)) {
-            continue
-        }
-        $metrics = Read-JsonFile -Path $metricsPath
-        $summaryRows += [pscustomobject]@{
-            fold         = $FoldNameMap[$foldDir.Name]
-            fold_dir     = $foldDir.Name
-            accuracy     = Get-MetricValue -Metrics $metrics -Name "accuracy"
-            accuracy_std = Get-MetricValue -Metrics $metrics -Name "accuracy_std"
-            macro_f1     = Get-MetricValue -Metrics $metrics -Name "macro_f1"
-            macro_f1_std = Get-MetricValue -Metrics $metrics -Name "macro_f1_std"
-            loss         = Get-MetricValue -Metrics $metrics -Name "loss"
-        }
-    }
-
-    if ($summaryRows.Count -eq 0) {
-        throw "No fold test_metrics.json files found under $FinetuneRoot"
-    }
-
-    $accuracyValues = @($summaryRows | ForEach-Object { [double]$_.accuracy })
-    $macroF1Values = @($summaryRows | ForEach-Object { [double]$_.macro_f1 })
-    $lossValues = @($summaryRows | ForEach-Object { [double]$_.loss })
-
-    $summaryRows += [pscustomobject]@{
-        fold         = "CROSS_FOLD_MEAN_STD"
-        fold_dir     = ""
-        accuracy     = Get-MeanValue -Values $accuracyValues
-        accuracy_std = Get-StdValue -Values $accuracyValues
-        macro_f1     = Get-MeanValue -Values $macroF1Values
-        macro_f1_std = Get-StdValue -Values $macroF1Values
-        loss         = Get-MeanValue -Values $lossValues
-    }
-
-    $summaryPath = Join-Path $FinetuneRoot "loso_finetune_summary.csv"
-    $summaryRows | Export-Csv -Path $summaryPath -NoTypeInformation -Encoding UTF8
-    $summaryRows | Format-Table -AutoSize | Out-String | Write-Host
 }
 
 function Resolve-DatasetRoot {
@@ -397,73 +311,46 @@ elseif (-not $baselineEnabled) {
     Write-Host ("Pretrain checkpoint not found at expected paths: " + $jointCheckpointPath + " or " + $jointTrainingCheckpointPath + "; finetune will run without contrastive checkpoint unless you pass --contrastive-checkpoint manually.")
 }
 
-$foldNameMap = @{}
-for ($foldIndex = 0; $foldIndex -lt $foldDirs.Count; $foldIndex++) {
-    $foldNameMap[$foldDirs[$foldIndex].Name] = "fold$($foldIndex + 1)"
+$finetuneScript = (Join-Path $repoRoot "run_finetune.py")
+$finetuneArgs = @(
+    "--config", $targetFinetuneConfig,
+    "--loso",
+    "--root-dir", $targetCacheRoot,
+    "--output-dir", $finetuneRoot
+)
+if ($jointCheckpointSourcePath -and -not $baselineEnabled) {
+    $finetuneArgs += @("--contrastive-checkpoint", $jointCheckpointSourcePath)
+}
+if ($TestOnly) {
+    $finetuneArgs += "--test-only"
+}
+if ($FinetuneEpochs -gt 0) {
+    $finetuneArgs += @("--epochs", $FinetuneEpochs.ToString())
+}
+if ($FinetuneBatchSize -gt 0) {
+    $finetuneArgs += @("--batch-size", $FinetuneBatchSize.ToString())
+}
+if ($EvalBatchSize -gt 0) {
+    $finetuneArgs += @("--eval-batch-size", $EvalBatchSize.ToString())
+}
+if ($NumWorkers -ge 0) {
+    $finetuneArgs += @("--num-workers", $NumWorkers.ToString())
+}
+if ($ForceCpu) {
+    $finetuneArgs += "--force-cpu"
+}
+elseif ($GpuCount -gt 0) {
+    $finetuneArgs += @("--set", "train.gpu_count=$GpuCount")
+    if ($gpuIdList.Count -gt 0) {
+        $finetuneArgs += @("--set", "train.gpu_ids=$($gpuIdList -join ',')")
+    }
 }
 
-foreach ($foldDir in $foldDirs) {
-    $foldStartTime = Get-Date
-    $foldName = $foldDir.Name
-    $trainManifest = Join-Path $foldDir.FullName "manifest_train.csv"
-    $valManifest = Join-Path $foldDir.FullName "manifest_val.csv"
-    $testManifest = Join-Path $foldDir.FullName "manifest_test.csv"
-    $foldOutputDir = Join-Path $finetuneRoot $foldName
-    $finetuneCheckpoint = Join-Path $foldOutputDir "checkpoints\best.pth"
-    if (!(Test-Path $trainManifest) -or !(Test-Path $valManifest) -or !(Test-Path $testManifest)) {
-        throw "Missing LOSO manifest(s) under $($foldDir.FullName)"
-    }
-
-    $finetuneScript = (Join-Path $repoRoot "run_finetune.py")
-    $finetuneArgs = @(
-        "--config", $targetFinetuneConfig,
-        "--train-manifest", $trainManifest,
-        "--val-manifest", $valManifest,
-        "--test-manifest", $testManifest,
-        "--root-dir", $targetCacheRoot,
-        "--output-dir", $foldOutputDir
-    )
-    if ($jointCheckpointSourcePath -and -not $baselineEnabled) {
-        $finetuneArgs += @("--contrastive-checkpoint", $jointCheckpointSourcePath)
-    }
-    if ($TestOnly) {
-        if (!(Test-Path $finetuneCheckpoint)) {
-            throw "Expected finetune checkpoint not found for test-only: $finetuneCheckpoint"
-        }
-        $finetuneArgs += @("--finetune-checkpoint", $finetuneCheckpoint, "--test-only")
-    }
-    if ($FinetuneEpochs -gt 0) {
-        $finetuneArgs += @("--epochs", $FinetuneEpochs.ToString())
-    }
-    if ($FinetuneBatchSize -gt 0) {
-        $finetuneArgs += @("--batch-size", $FinetuneBatchSize.ToString())
-    }
-    if ($EvalBatchSize -gt 0) {
-        $finetuneArgs += @("--eval-batch-size", $EvalBatchSize.ToString())
-    }
-    if ($NumWorkers -ge 0) {
-        $finetuneArgs += @("--num-workers", $NumWorkers.ToString())
-    }
-    if ($ForceCpu) {
-        $finetuneArgs += "--force-cpu"
-    }
-    elseif ($GpuCount -gt 0) {
-        $finetuneArgs += @("--set", "train.gpu_count=$GpuCount")
-        if ($gpuIdList.Count -gt 0) {
-            $finetuneArgs += @("--set", "train.gpu_ids=$($gpuIdList -join ',')")
-        }
-    }
-
-    Write-Host ("[" + $foldNameMap[$foldName] + "] finetune")
-    if ($useMultiGpu) {
-        $ddpFinetuneArgs = @("-m", "torch.distributed.run", "--nproc_per_node", $GpuCount.ToString(), $finetuneScript) + $finetuneArgs
-        Invoke-CommandOrThrow -Executable $python -Args $ddpFinetuneArgs -StepName ("finetune " + $foldName)
-    }
-    else {
-        Invoke-CommandOrThrow -Executable $python -Args (@($finetuneScript) + $finetuneArgs) -StepName ("finetune " + $foldName)
-    }
-    $foldElapsedSeconds = ((Get-Date) - $foldStartTime).TotalSeconds
-    Write-Host ("[" + $foldNameMap[$foldName] + "] fold_elapsed=" + ([math]::Round($foldElapsedSeconds, 1)) + "s")
+Write-Host "Running LOSO finetune..."
+if ($useMultiGpu) {
+    $ddpFinetuneArgs = @("-m", "torch.distributed.run", "--nproc_per_node", $GpuCount.ToString(), $finetuneScript) + $finetuneArgs
+    Invoke-CommandOrThrow -Executable $python -Args $ddpFinetuneArgs -StepName "LOSO finetune"
 }
-
-Write-FinetuneSummary -FinetuneRoot $finetuneRoot -FoldNameMap $foldNameMap
+else {
+    Invoke-CommandOrThrow -Executable $python -Args (@($finetuneScript) + $finetuneArgs) -StepName "LOSO finetune"
+}

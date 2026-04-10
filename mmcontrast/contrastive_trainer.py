@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 from .datasets import PairedEEGfMRIDataset
 from .distributed import cleanup_distributed, configure_cudnn, configure_runtime_devices, gather_tensor, init_distributed, is_dist_initialized, is_main_process, runtime_summary
-from .losses import DCCAPretrainLoss, PureInfoNCEPretrainLoss, SharedPrivatePretrainLoss
+from .losses import BarlowTwinsPretrainLoss, PureInfoNCEPretrainLoss, SharedPrivatePretrainLoss
 from .metrics import contrastive_retrieval_metrics
 from .models import EEGfMRIContrastiveModel, EEGfMRISharedOnlyContrastiveModel
 
@@ -99,10 +99,10 @@ class ContrastiveTrainer:
             self.criterion = PureInfoNCEPretrainLoss(
                 temperature=float(train_cfg.get("temperature", 0.07)),
             )
-        elif self.pretrain_objective == "dcca":
-            self.criterion = DCCAPretrainLoss(
-                reg=float(train_cfg.get("dcca_reg", 1e-4)),
-                eps=float(train_cfg.get("dcca_eps", 1e-9)),
+        elif self.pretrain_objective == "barlow_twins":
+            self.criterion = BarlowTwinsPretrainLoss(
+                lambda_offdiag=float(train_cfg.get("barlow_lambda_offdiag", 5e-3)),
+                eps=float(train_cfg.get("barlow_eps", 1e-9)),
             )
         else:
             raise ValueError(f"Unsupported pretrain objective: {self.pretrain_objective}")
@@ -124,7 +124,6 @@ class ContrastiveTrainer:
         self.amp_dtype = str(train_cfg.get("amp_dtype", "fp16"))
         self.scaler = _build_grad_scaler(enabled=self.use_amp and self.amp_dtype == "fp16")
         self.log_interval = int(train_cfg.get("log_interval", 20))
-
         self.output_dir = self.resolve_path(str(train_cfg.get("output_dir", "outputs/run1")))
         self.ckpt_dir = self.output_dir / "checkpoints"
         self.resume_path = str(train_cfg.get("resume_path", "")).strip()
@@ -297,9 +296,11 @@ class ContrastiveTrainer:
                         band_power_target=band_power,
                     )
                 else:
+                    eeg_for_loss = out["eeg_shared"] if self.pretrain_objective == "barlow_twins" else out["eeg_embed"]
+                    fmri_for_loss = out["fmri_shared"] if self.pretrain_objective == "barlow_twins" else out["fmri_embed"]
                     loss_dict = self.criterion(
-                        eeg_shared=out["eeg_embed"],
-                        fmri_shared=out["fmri_embed"],
+                        eeg_shared=eeg_for_loss,
+                        fmri_shared=fmri_for_loss,
                     )
                 loss = loss_dict["loss"]
 

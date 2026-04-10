@@ -147,66 +147,6 @@ test_target_cache_ready() {
     return 0
 }
 
-write_finetune_summary() {
-    local finetune_root="$1"
-    python - <<'PY' "${finetune_root}"
-import csv
-import json
-import math
-import os
-import statistics
-import sys
-
-root = sys.argv[1]
-rows = []
-for name in sorted(os.listdir(root)):
-    if not name.startswith("fold_"):
-        continue
-    metrics_path = os.path.join(root, name, "test_metrics.json")
-    if not os.path.isfile(metrics_path):
-        continue
-    with open(metrics_path, "r", encoding="utf-8") as f:
-        m = json.load(f)
-    rows.append({
-        "fold": name,
-        "fold_dir": name,
-        "accuracy": float(m.get("accuracy", 0.0) or 0.0),
-        "accuracy_std": float(m.get("accuracy_std", 0.0) or 0.0),
-        "macro_f1": float(m.get("macro_f1", 0.0) or 0.0),
-        "macro_f1_std": float(m.get("macro_f1_std", 0.0) or 0.0),
-        "loss": float(m.get("loss", 0.0) or 0.0),
-    })
-if not rows:
-    raise SystemExit(f"No fold test_metrics.json files found under {root}")
-
-def mean(vals):
-    return statistics.mean(vals) if vals else 0.0
-
-def std(vals):
-    return statistics.pstdev(vals) if len(vals) > 1 else 0.0
-
-rows.append({
-    "fold": "CROSS_FOLD_MEAN_STD",
-    "fold_dir": "",
-    "accuracy": mean([r["accuracy"] for r in rows]),
-    "accuracy_std": std([r["accuracy"] for r in rows]),
-    "macro_f1": mean([r["macro_f1"] for r in rows]),
-    "macro_f1_std": std([r["macro_f1"] for r in rows]),
-    "loss": mean([r["loss"] for r in rows]),
-})
-
-out_csv = os.path.join(root, "loso_finetune_summary.csv")
-with open(out_csv, "w", encoding="utf-8", newline="") as f:
-    writer = csv.DictWriter(f, fieldnames=["fold","fold_dir","accuracy","accuracy_std","macro_f1","macro_f1_std","loss"])
-    writer.writeheader()
-    writer.writerows(rows)
-
-print("Wrote", out_csv)
-for r in rows:
-    print(r)
-PY
-}
-
 if [[ "${SKIP_PRETRAIN}" == "true" && "${SKIP_FINETUNE}" == "true" ]]; then
     echo "--skip-pretrain and --skip-finetune cannot both be set" >&2
     exit 2
@@ -422,58 +362,33 @@ elif [[ "${baseline_enabled}" != "true" ]]; then
     echo "Pretrain checkpoint not found at expected paths: ${joint_checkpoint_path} or ${joint_training_checkpoint_path}; finetune will run without contrastive checkpoint unless you pass --contrastive-checkpoint manually."
 fi
 
-for fold_dir in "${fold_dirs[@]}"; do
-    fold_start_seconds="$(date +%s)"
-    fold_name="$(basename "${fold_dir}")"
-    train_manifest="${fold_dir}/manifest_train.csv"
-    val_manifest="${fold_dir}/manifest_val.csv"
-    test_manifest="${fold_dir}/manifest_test.csv"
-    fold_output_dir="${finetune_root}/${fold_name}"
-    finetune_checkpoint="${fold_output_dir}/checkpoints/best.pth"
+finetune_args=(
+    "--config" "${target_finetune_config}"
+    "--loso"
+    "--root-dir" "${target_cache_root}"
+    "--output-dir" "${finetune_root}"
+)
+if [[ -n "${joint_checkpoint_source_path}" && "${baseline_enabled}" != "true" ]]; then
+    finetune_args+=("--contrastive-checkpoint" "${joint_checkpoint_source_path}")
+fi
+if [[ "${TEST_ONLY}" == "true" ]]; then
+    finetune_args+=("--test-only")
+fi
+if [[ ${FINETUNE_EPOCHS} -gt 0 ]]; then finetune_args+=("--epochs" "${FINETUNE_EPOCHS}"); fi
+if [[ ${FINETUNE_BATCH_SIZE} -gt 0 ]]; then finetune_args+=("--batch-size" "${FINETUNE_BATCH_SIZE}"); fi
+if [[ ${EVAL_BATCH_SIZE} -gt 0 ]]; then finetune_args+=("--eval-batch-size" "${EVAL_BATCH_SIZE}"); fi
+if [[ ${NUM_WORKERS} -ge 0 ]]; then finetune_args+=("--num-workers" "${NUM_WORKERS}"); fi
+if [[ "${FORCE_CPU}" == "true" ]]; then finetune_args+=("--force-cpu"); fi
+if [[ "${FORCE_CPU}" != "true" ]]; then
+    finetune_args+=("--set" "train.gpu_count=${GPU_COUNT}")
+    if [[ ${#NONEMPTY_GPU_IDS[@]} -gt 0 ]]; then
+        finetune_args+=("--set" "train.gpu_ids=$(IFS=,; echo "${NONEMPTY_GPU_IDS[*]}")")
+    fi
+fi
 
-    if [[ ! -f "${train_manifest}" || ! -f "${val_manifest}" || ! -f "${test_manifest}" ]]; then
-        echo "Missing LOSO manifest(s) under ${fold_dir}" >&2
-        exit 1
-    fi
-
-    finetune_args=(
-        "--config" "${target_finetune_config}"
-        "--train-manifest" "${train_manifest}"
-        "--val-manifest" "${val_manifest}"
-        "--test-manifest" "${test_manifest}"
-        "--root-dir" "${target_cache_root}"
-        "--output-dir" "${fold_output_dir}"
-    )
-    if [[ -n "${joint_checkpoint_source_path}" && "${baseline_enabled}" != "true" ]]; then
-        finetune_args+=("--contrastive-checkpoint" "${joint_checkpoint_source_path}")
-    fi
-    if [[ "${TEST_ONLY}" == "true" ]]; then
-        if [[ ! -f "${finetune_checkpoint}" ]]; then
-            echo "Expected finetune checkpoint not found for test-only: ${finetune_checkpoint}" >&2
-            exit 1
-        fi
-        finetune_args+=("--finetune-checkpoint" "${finetune_checkpoint}" "--test-only")
-    fi
-    if [[ ${FINETUNE_EPOCHS} -gt 0 ]]; then finetune_args+=("--epochs" "${FINETUNE_EPOCHS}"); fi
-    if [[ ${FINETUNE_BATCH_SIZE} -gt 0 ]]; then finetune_args+=("--batch-size" "${FINETUNE_BATCH_SIZE}"); fi
-    if [[ ${EVAL_BATCH_SIZE} -gt 0 ]]; then finetune_args+=("--eval-batch-size" "${EVAL_BATCH_SIZE}"); fi
-    if [[ ${NUM_WORKERS} -ge 0 ]]; then finetune_args+=("--num-workers" "${NUM_WORKERS}"); fi
-    if [[ "${FORCE_CPU}" == "true" ]]; then finetune_args+=("--force-cpu"); fi
-    if [[ "${FORCE_CPU}" != "true" ]]; then
-        finetune_args+=("--set" "train.gpu_count=${GPU_COUNT}")
-        if [[ ${#NONEMPTY_GPU_IDS[@]} -gt 0 ]]; then
-            finetune_args+=("--set" "train.gpu_ids=$(IFS=,; echo "${NONEMPTY_GPU_IDS[*]}")")
-        fi
-    fi
-
-    echo "[${fold_name}] finetune"
-    if [[ "${USE_MULTI_GPU}" == "true" ]]; then
-        invoke_or_throw "finetune ${fold_name}" "${PYTHON}" -m torch.distributed.run --nproc_per_node "${GPU_COUNT}" "${REPO_ROOT}/run_finetune.py" "${finetune_args[@]}"
-    else
-        invoke_or_throw "finetune ${fold_name}" "${PYTHON}" "${REPO_ROOT}/run_finetune.py" "${finetune_args[@]}"
-    fi
-    fold_end_seconds="$(date +%s)"
-    echo "[${fold_name}] fold_elapsed=$((fold_end_seconds - fold_start_seconds))s"
-done
-
-write_finetune_summary "${finetune_root}"
+echo "Running LOSO finetune..."
+if [[ "${USE_MULTI_GPU}" == "true" ]]; then
+    invoke_or_throw "LOSO finetune" "${PYTHON}" -m torch.distributed.run --nproc_per_node "${GPU_COUNT}" "${REPO_ROOT}/run_finetune.py" "${finetune_args[@]}"
+else
+    invoke_or_throw "LOSO finetune" "${PYTHON}" "${REPO_ROOT}/run_finetune.py" "${finetune_args[@]}"
+fi

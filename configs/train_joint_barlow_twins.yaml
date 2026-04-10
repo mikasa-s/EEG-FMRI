@@ -1,5 +1,5 @@
 train:
-  output_dir: outputs/joint_dcca/pretrain
+  output_dir: outputs/joint_barlow_twins/pretrain
   force_cpu: false
   gpu_count: 1
   gpu_ids: [3]
@@ -14,17 +14,17 @@ train:
   grad_clip: 1.0
   use_amp: true
   amp_dtype: fp16
-  projection_dim: 256
   temperature: 0.07
+  projection_dim: 256
   band_power_loss_weight: 10.0
   separation_loss_weight: 10.0
   head_dropout: 0.0
   log_interval: 200
   eval_interval: 1
   resume_path: ""
-  pretrain_objective: dcca
-  dcca_reg: 0.0001
-  dcca_eps: 1.0e-9
+  pretrain_objective: barlow_twins
+  barlow_lambda_offdiag: 0.005
+  barlow_eps: 1.0e-9
 
 data:
   manifest_csv: cache/joint_contrastive/manifest_all.csv

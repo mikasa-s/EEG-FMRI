@@ -88,59 +88,46 @@ class PureInfoNCEPretrainLoss(torch.nn.Module):
         }
 
 
-class DCCALoss(torch.nn.Module):
-    def __init__(self, reg: float = 1e-4, eps: float = 1e-9) -> None:
+def _off_diagonal(x: torch.Tensor) -> torch.Tensor:
+    n, m = x.shape
+    if n != m:
+        raise ValueError(f"off-diagonal expects square matrix, got {tuple(x.shape)}")
+    return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
+
+
+class BarlowTwinsPretrainLoss(torch.nn.Module):
+    def __init__(self, lambda_offdiag: float = 5e-3, eps: float = 1e-9) -> None:
         super().__init__()
-        self.reg = float(reg)
+        self.lambda_offdiag = float(lambda_offdiag)
         self.eps = float(eps)
 
-    def forward(self, view1: torch.Tensor, view2: torch.Tensor) -> torch.Tensor:
-        if view1.ndim != 2 or view2.ndim != 2:
-            raise ValueError("DCCA loss expects 2D feature tensors")
-        if view1.shape != view2.shape:
-            raise ValueError(f"DCCA views must have matching shapes, got {tuple(view1.shape)} and {tuple(view2.shape)}")
-
-        batch_size, feat_dim = view1.shape
-        if batch_size <= 1:
-            return view1.new_zeros(())
-
-        h1 = view1 - view1.mean(dim=0, keepdim=True)
-        h2 = view2 - view2.mean(dim=0, keepdim=True)
-
-        denom = float(max(batch_size - 1, 1))
-        sigma11 = (h1.t() @ h1) / denom
-        sigma22 = (h2.t() @ h2) / denom
-        sigma12 = (h1.t() @ h2) / denom
-
-        identity = torch.eye(feat_dim, device=view1.device, dtype=view1.dtype)
-        sigma11 = sigma11 + self.reg * identity
-        sigma22 = sigma22 + self.reg * identity
-
-        evals_11, evecs_11 = torch.linalg.eigh(sigma11)
-        evals_22, evecs_22 = torch.linalg.eigh(sigma22)
-        evals_11 = torch.clamp(evals_11, min=self.eps)
-        evals_22 = torch.clamp(evals_22, min=self.eps)
-
-        sigma11_inv_sqrt = evecs_11 @ torch.diag(evals_11.rsqrt()) @ evecs_11.t()
-        sigma22_inv_sqrt = evecs_22 @ torch.diag(evals_22.rsqrt()) @ evecs_22.t()
-
-        t_matrix = sigma11_inv_sqrt @ sigma12 @ sigma22_inv_sqrt
-        singular_values = torch.linalg.svdvals(t_matrix)
-        correlation = singular_values.sum()
-        return -correlation
-
-
-class DCCAPretrainLoss(torch.nn.Module):
-    def __init__(self, reg: float = 1e-4, eps: float = 1e-9) -> None:
-        super().__init__()
-        self.dcca = DCCALoss(reg=reg, eps=eps)
-
     def forward(self, eeg_shared: torch.Tensor, fmri_shared: torch.Tensor) -> dict[str, torch.Tensor]:
-        correlation_loss = self.dcca(eeg_shared, fmri_shared)
-        zero = correlation_loss.new_zeros(())
+        if eeg_shared.ndim != 2 or fmri_shared.ndim != 2:
+            raise ValueError("Barlow Twins loss expects 2D feature tensors")
+        if eeg_shared.shape != fmri_shared.shape:
+            raise ValueError(
+                f"Barlow Twins views must have matching shapes, got {tuple(eeg_shared.shape)} and {tuple(fmri_shared.shape)}"
+            )
+
+        device_type = eeg_shared.device.type
+        with torch.autocast(device_type=device_type, enabled=False):
+            z1 = eeg_shared.float()
+            z2 = fmri_shared.float()
+            batch_size = z1.size(0)
+            if batch_size <= 1:
+                loss = z1.new_zeros(())
+            else:
+                z1 = (z1 - z1.mean(dim=0, keepdim=True)) / (z1.std(dim=0, unbiased=False, keepdim=True) + self.eps)
+                z2 = (z2 - z2.mean(dim=0, keepdim=True)) / (z2.std(dim=0, unbiased=False, keepdim=True) + self.eps)
+                cross_correlation = (z1.T @ z2) / float(batch_size)
+                on_diag = torch.diagonal(cross_correlation).add_(-1.0).pow_(2).sum()
+                off_diag = _off_diagonal(cross_correlation).pow_(2).sum()
+                loss = on_diag + self.lambda_offdiag * off_diag
+
+        zero = loss.new_zeros(())
         return {
-            "loss": correlation_loss,
-            "contrastive_loss": correlation_loss,
+            "loss": loss,
+            "contrastive_loss": loss,
             "band_power_loss": zero,
             "separation_loss": zero,
         }

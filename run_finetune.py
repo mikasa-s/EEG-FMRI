@@ -3,6 +3,10 @@ from __future__ import annotations
 """分类微调入口脚本。"""
 
 import argparse
+import copy
+import csv
+import json
+import math
 import sys
 import tempfile
 from pathlib import Path
@@ -21,6 +25,8 @@ def parse_args() -> argparse.Namespace:
     """解析微调所需参数，支持直接覆盖常用配置。"""
     parser = argparse.ArgumentParser("EEG-fMRI finetuning for classification")
     parser.add_argument("--config", type=str, default="configs/finetune_ds002739.yaml")
+    parser.add_argument("--loso", action="store_true", help="Run all fold_* under LOSO split root and write loso_finetune_summary.csv.")
+    parser.add_argument("--split-root", type=str, default="", help="Optional LOSO split root. Defaults to <root_dir>/loso_subjectwise.")
     parser.add_argument("--train-manifest", type=str, default="")
     parser.add_argument("--val-manifest", type=str, default="")
     parser.add_argument("--test-manifest", type=str, default="")
@@ -146,11 +152,117 @@ def write_runtime_config(config: dict, source_config: Path) -> Path:
         return Path(handle.name)
 
 
+def _resolve_repo_path(path_str: str) -> Path:
+    path = Path(path_str)
+    return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
+
+
+def _mean(values: list[float]) -> float:
+    valid = [value for value in values if not math.isnan(value)]
+    return float("nan") if not valid else sum(valid) / len(valid)
+
+
+def _std(values: list[float]) -> float:
+    valid = [value for value in values if not math.isnan(value)]
+    if len(valid) <= 1:
+        return 0.0
+    avg = sum(valid) / len(valid)
+    return math.sqrt(sum((value - avg) ** 2 for value in valid) / (len(valid) - 1))
+
+
+def write_loso_summary(finetune_root: Path) -> Path:
+    rows: list[dict[str, float | str]] = []
+    for fold_dir in sorted(path for path in finetune_root.iterdir() if path.is_dir() and path.name.startswith("fold_")):
+        metrics_path = fold_dir / "test_metrics.json"
+        if not metrics_path.exists():
+            continue
+        with metrics_path.open("r", encoding="utf-8") as handle:
+            metrics = json.load(handle) or {}
+        rows.append(
+            {
+                "fold": fold_dir.name,
+                "accuracy": float(metrics.get("accuracy", float("nan"))),
+                "accuracy_std": float(metrics.get("accuracy_std", float("nan"))),
+                "macro_f1": float(metrics.get("macro_f1", float("nan"))),
+                "macro_f1_std": float(metrics.get("macro_f1_std", float("nan"))),
+                "loss": float(metrics.get("loss", float("nan"))),
+            }
+        )
+
+    if not rows:
+        raise FileNotFoundError(f"No fold test_metrics.json files found under {finetune_root}")
+
+    rows.append(
+        {
+            "fold": "CROSS_FOLD_MEAN_STD",
+            "accuracy": _mean([float(row["accuracy"]) for row in rows]),
+            "accuracy_std": _std([float(row["accuracy"]) for row in rows]),
+            "macro_f1": _mean([float(row["macro_f1"]) for row in rows]),
+            "macro_f1_std": _std([float(row["macro_f1"]) for row in rows]),
+            "loss": _mean([float(row["loss"]) for row in rows]),
+        }
+    )
+
+    summary_path = finetune_root / "loso_finetune_summary.csv"
+    with summary_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+    return summary_path
+
+
+def run_loso_finetuning(args: argparse.Namespace, source_config_path: Path, base_config: dict) -> None:
+    root_dir_value = args.root_dir.strip() or str((base_config.get("data", {}) or {}).get("root_dir", "")).strip()
+    if not root_dir_value:
+        raise ValueError("Could not resolve data.root_dir for LOSO run. Pass --root-dir explicitly or set it in config.")
+    root_dir = _resolve_repo_path(root_dir_value)
+    split_root = _resolve_repo_path(args.split_root.strip()) if args.split_root.strip() else (root_dir / "loso_subjectwise")
+    if not split_root.exists():
+        raise FileNotFoundError(f"LOSO split root not found: {split_root}")
+
+    fold_dirs = sorted(path for path in split_root.iterdir() if path.is_dir() and path.name.startswith("fold_"))
+    if not fold_dirs:
+        raise FileNotFoundError(f"No fold_* directories found under {split_root}")
+
+    output_root_value = args.output_dir.strip() or str((base_config.get("finetune", {}) or {}).get("output_dir", "")).strip()
+    if not output_root_value:
+        raise ValueError("Could not resolve finetune.output_dir for LOSO run. Pass --output-dir explicitly or set it in config.")
+    output_root = _resolve_repo_path(output_root_value)
+    if output_root.name.startswith("fold_"):
+        output_root = output_root.parent
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    for fold_dir in fold_dirs:
+        fold_name = fold_dir.name
+        print(f"[{fold_name}] finetune", flush=True)
+        fold_args = argparse.Namespace(**vars(args))
+        fold_args.loso = False
+        fold_args.train_manifest = str((fold_dir / "manifest_train.csv").resolve())
+        fold_args.val_manifest = str((fold_dir / "manifest_val.csv").resolve())
+        fold_args.test_manifest = str((fold_dir / "manifest_test.csv").resolve())
+        fold_args.root_dir = str(root_dir)
+        fold_args.output_dir = str((output_root / fold_name).resolve())
+
+        fold_config = apply_overrides(copy.deepcopy(base_config), fold_args)
+        runtime_config_path = write_runtime_config(fold_config, source_config_path)
+        try:
+            run_finetuning(str(runtime_config_path))
+        finally:
+            runtime_config_path.unlink(missing_ok=True)
+
+    summary_path = write_loso_summary(output_root)
+    print(f"Saved summary: {summary_path}", flush=True)
+
+
 def main() -> None:
     """加载配置、应用命令行覆盖，并启动下游分类微调。"""
     args = parse_args()
     config_path = Path(args.config)
     config = load_yaml_config(config_path)
+    if args.loso:
+        run_loso_finetuning(args, config_path, config)
+        return
+
     resolved_config = apply_overrides(config, args)
     runtime_config_path = write_runtime_config(resolved_config, config_path)
     try:

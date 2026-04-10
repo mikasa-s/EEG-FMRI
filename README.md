@@ -25,7 +25,7 @@ conda activate <your-mamba-env>
 - 预训练损失由 `InfoNCE(shared)`、`band-power regression(private)`、`shared/private separation loss` 组成
 - 额外支持两个最简单的跨模态 baseline：
   - `Pure InfoNCE`：只保留 EEG shared encoder 和 fMRI encoder，只用 symmetric InfoNCE
-  - `DCCA`：只保留 EEG shared encoder 和 fMRI encoder，只用 DCCA correlation loss
+  - `Barlow Twins`：只保留 EEG shared encoder 和 fMRI encoder，只用跨模态 Barlow Twins loss
 
 2. EEG-only 微调分类
 - 适用数据集：`ds002336`、`ds002338`、`ds002739`、`ds009999(SEED)`
@@ -191,7 +191,7 @@ finetune:
 目前额外提供两个最简单的跨模态 baseline：
 
 - `train.pretrain_objective=infonce`
-- `train.pretrain_objective=dcca`
+- `train.pretrain_objective=barlow_twins`
 
 它们都只保留 `EEG shared encoder + fMRI encoder`，不使用 `EEG private encoder`、`band-power loss`、`separation loss` 或其他额外损失。
 
@@ -270,10 +270,10 @@ Pure InfoNCE baseline：
 python run_train.py --config configs\train_joint_infonce.yaml
 ```
 
-DCCA baseline：
+Barlow Twins baseline：
 
 ```powershell
-python run_train.py --config configs\train_joint_dcca.yaml
+python run_train.py --config configs\train_joint_barlow_twins.yaml
 ```
 
 ### 9. 单 fold 微调 ds002338
@@ -288,7 +288,7 @@ python run_finetune.py --config configs\finetune_ds002338.yaml
 python run_finetune.py --config configs\finetune_ds009999.yaml
 ```
 
-如果要评估 `Pure InfoNCE / DCCA` 预训练后的 EEG-only 微调，可在现有微调配置上追加：
+如果要评估 `Pure InfoNCE / Barlow Twins` 预训练后的 EEG-only 微调，可在现有微调配置上追加：
 
 ```powershell
 python run_finetune.py --config configs\finetune_ds009999.yaml --set "finetune.eeg_encoder_variant='shared_only'" --set "finetune.fusion='eeg_only'" --set "finetune.classifier_mode='shared'" --set "finetune.contrastive_checkpoint_path='path\\to\\best.pth'"
@@ -316,10 +316,10 @@ python run_finetune.py --config configs\finetune_ds009999.yaml --force-cpu --set
 
 ### 12. LOSO 全折微调 ds009999
 
-先预处理生成 `cache\ds009999\loso_subjectwise\fold_*`，然后对每个 fold 调用 `run_finetune.py`。单个 fold 的调用格式如下：
+先预处理生成 `cache\ds009999\loso_subjectwise\fold_*`，然后可直接用 `run_finetune.py --loso` 跑完整 LOSO：
 
 ```powershell
-python run_finetune.py --config configs\finetune_ds009999.yaml --train-manifest cache\ds009999\loso_subjectwise\fold_ds009999_sub01\manifest_train.csv --val-manifest cache\ds009999\loso_subjectwise\fold_ds009999_sub01\manifest_val.csv --test-manifest cache\ds009999\loso_subjectwise\fold_ds009999_sub01\manifest_test.csv --root-dir cache\ds009999 --output-dir outputs\ds009999\finetune\fold_ds009999_sub01
+python run_finetune.py --config configs\finetune_ds009999.yaml --loso --root-dir cache\ds009999 --output-dir outputs\ds009999\finetune
 ```
 
 ### 13. 混淆矩阵
@@ -423,10 +423,10 @@ Pure InfoNCE baseline：
 python run_train.py --config configs/train_joint_infonce.yaml
 ```
 
-DCCA baseline：
+Barlow Twins baseline：
 
 ```bash
-python run_train.py --config configs/train_joint_dcca.yaml
+python run_train.py --config configs/train_joint_barlow_twins.yaml
 ```
 
 ### 9. 单 fold 微调 ds002338
@@ -441,7 +441,7 @@ python run_finetune.py --config configs/finetune_ds002338.yaml
 python run_finetune.py --config configs/finetune_ds009999.yaml
 ```
 
-如果要评估 `Pure InfoNCE / DCCA` 预训练后的 EEG-only 微调，可在现有微调配置上追加：
+如果要评估 `Pure InfoNCE / Barlow Twins` 预训练后的 EEG-only 微调，可在现有微调配置上追加：
 
 ```bash
 python run_finetune.py --config configs/finetune_ds009999.yaml --set "finetune.eeg_encoder_variant='shared_only'" --set "finetune.fusion='eeg_only'" --set "finetune.classifier_mode='shared'" --set "finetune.contrastive_checkpoint_path='path/to/best.pth'"
@@ -476,7 +476,7 @@ python run_finetune.py --config configs/finetune_ds009999.yaml --force-cpu --set
 ### 12. LOSO 单 fold 微调 ds009999
 
 ```bash
-python run_finetune.py --config configs/finetune_ds009999.yaml --train-manifest cache/ds009999/loso_subjectwise/fold_ds009999_sub01/manifest_train.csv --val-manifest cache/ds009999/loso_subjectwise/fold_ds009999_sub01/manifest_val.csv --test-manifest cache/ds009999/loso_subjectwise/fold_ds009999_sub01/manifest_test.csv --root-dir cache/ds009999 --output-dir outputs/ds009999/finetune/fold_ds009999_sub01
+python run_finetune.py --config configs/finetune_ds009999.yaml --loso --root-dir cache/ds009999 --output-dir outputs/ds009999/finetune
 ```
 
 ### 13. 混淆矩阵

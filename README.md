@@ -154,6 +154,7 @@ finetune:
 - `shared`
 - `private`
 - `concat`
+- `add`
 
 ### 4. 无 contrastive checkpoint 时的微调 fallback
 

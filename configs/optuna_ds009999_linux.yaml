@@ -5,44 +5,45 @@ study:
   n_trials: 20
   output_dir: outputs/optuna/ds009999
   command:
-    - python
-    - run_finetune.py
+  - python
+  - run_finetune.py
   static_args:
-    - --loso
-    - --root-dir
-    - cache/ds009999
+  - --loso
+  - --root-dir
+  - cache/ds009999
   output_arg: --output-dir
-
 runtime_configs:
   finetune_base: configs/finetune_ds009999.yaml
   finetune_arg: --config
-
 metric:
   type: csv
   path: loso_finetune_summary.csv
   column: accuracy
   row_filter:
     fold: CROSS_FOLD_MEAN_STD
-
 parameters:
   train_epochs:
     suggest: categorical
-    choices: [20, 30, 40]
+    choices:
+    - 20
+    - 30
+    - 40
     target: config
     config_updates:
-      - config: finetune
-        key: finetune.epochs
-
+    - config: finetune
+      key: finetune.epochs
   finetune_batch_size:
     suggest: categorical
-    choices: [32, 64, 128]
+    choices:
+    - 32
+    - 64
+    - 128
     target: config
     config_updates:
-      - config: finetune
-        key: train.batch_size
-      - config: finetune
-        key: train.eval_batch_size
-
+    - config: finetune
+      key: train.batch_size
+    - config: finetune
+      key: train.eval_batch_size
   finetune_lr:
     suggest: float
     low: 1e-4
@@ -50,9 +51,8 @@ parameters:
     log: true
     target: config
     config_updates:
-      - config: finetune
-        key: finetune.lr
-
+    - config: finetune
+      key: finetune.lr
   weight_decay:
     suggest: float
     low: 1e-6
@@ -60,9 +60,8 @@ parameters:
     log: true
     target: config
     config_updates:
-      - config: finetune
-        key: finetune.weight_decay
-
+    - config: finetune
+      key: finetune.weight_decay
   min_lr:
     suggest: float
     low: 1e-7
@@ -70,61 +69,83 @@ parameters:
     log: true
     target: config
     config_updates:
-      - config: finetune
-        key: finetune.min_lr
-
+    - config: finetune
+      key: finetune.min_lr
   hidden_dim:
     suggest: categorical
-    choices: [128, 256, 512]
+    choices:
+    - 128
+    - 256
+    - 512
     target: config
     config_updates:
-      - config: finetune
-        key: finetune.hidden_dim
-
+    - config: finetune
+      key: finetune.hidden_dim
   grad_clip:
     suggest: categorical
-    choices: [0.0, 0.5, 1.0, 5.0]
+    choices:
+    - 0.0
+    - 0.5
+    - 1.0
+    - 5.0
     target: config
     config_updates:
-      - config: finetune
-        key: finetune.grad_clip
-
+    - config: finetune
+      key: finetune.grad_clip
   early_stop_patience:
     suggest: categorical
-    choices: [3, 5, 8, 10]
+    choices:
+    - 3
+    - 5
+    - 8
+    - 10
     target: config
     config_updates:
-      - config: finetune
-        key: finetune.early_stop_patience
-
+    - config: finetune
+      key: finetune.early_stop_patience
   classifier_mode:
     suggest: categorical
-    choices: [shared, private, concat, add]
+    choices:
+    - shared
+    - private
+    - concat
+    - add
     target: config
     config_updates:
-      - config: finetune
-        key: finetune.classifier_mode
-
+    - config: finetune
+      key: finetune.classifier_mode
   n_layer:
     suggest: categorical
-    choices: [2, 4, 6, 12]
+    choices:
+    - 2
+    - 4
+    - 6
+    - 12
     target: config
     config_updates:
-      - config: finetune
-        key: eeg_model.n_layer
-
+    - config: finetune
+      key: eeg_model.n_layer
   dropout:
     suggest: categorical
-    choices: [0.1, 0.2, 0.3, 0.5]
+    choices:
+    - 0.1
+    - 0.2
+    - 0.3
+    - 0.5
     target: config
     config_updates:
-      - config: finetune
-        key: finetune.dropout
-
+    - config: finetune
+      key: finetune.dropout
 parameter_groups:
-  # pretrain: [train_epochs, pretrain_batch_size, pretrain_lr, weight_decay, min_lr, grad_clip]
-  finetune: [train_epochs, finetune_batch_size, finetune_lr, weight_decay, min_lr, hidden_dim, grad_clip, early_stop_patience]
-
+  finetune:
+  - train_epochs
+  - finetune_batch_size
+  - finetune_lr
+  - weight_decay
+  - min_lr
+  - hidden_dim
+  - grad_clip
+  - early_stop_patience
 modes:
   finetune_only:
     study_name: optuna_ds009999_finetune_only
@@ -134,4 +155,5 @@ modes:
       column: macro_f1
       row_filter:
         fold: CROSS_FOLD_MEAN_STD
-    parameter_groups: [finetune]
+    parameter_groups:
+    - finetune

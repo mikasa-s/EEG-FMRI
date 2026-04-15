@@ -2,31 +2,28 @@ study:
   name: optuna_ds002338
   default_mode: full
   direction: maximize
-  n_trials: 20
+  n_trials: 30
   output_dir: outputs/optuna/ds002338
   command:
-    - powershell
-    - -ExecutionPolicy
-    - Bypass
-    - -File
-    - scripts/run_optuna_pretrain_and_finetune.ps1
+    - bash
+    - scripts_linux/run_optuna_pretrain_and_finetune.sh
   static_args:
-    - -TargetDataset
+    - --target-dataset
     - ds002338
-    - -PretrainDatasets
+    - --pretrain-datasets
     - ds002336,ds002338,ds002739
-  output_arg: -OutputRoot
+  output_arg: --output-root
 
 runtime_configs:
   train_base: configs/train_joint_contrastive.yaml
   finetune_base: configs/finetune_ds002338.yaml
-  train_arg: -JointTrainConfig
-  finetune_arg: -FinetuneConfig
+  train_arg: --joint-train-config
+  finetune_arg: --finetune-config
 
 metric:
   type: csv
   path: finetune/loso_finetune_summary.csv
-  column: macro_f1
+  column: accuracy
   row_filter:
     fold: CROSS_FOLD_MEAN_STD
 
@@ -53,7 +50,7 @@ parameters:
 
   finetune_batch_size:
     suggest: categorical
-    choices: [8, 16]
+    choices: [64, 128, 256]
     target: config
     config_updates:
       - config: finetune
@@ -74,7 +71,7 @@ parameters:
   finetune_lr:
     suggest: float
     low: 1e-5
-    high: 1e-3
+    high: 1e-4
     log: true
     target: config
     config_updates:
@@ -96,7 +93,7 @@ parameters:
   min_lr:
     suggest: float
     low: 1e-7
-    high: 1e-4
+    high: 1e-5
     log: true
     target: config
     config_updates:
@@ -107,7 +104,7 @@ parameters:
 
   hidden_dim:
     suggest: categorical
-    choices: [128, 256, 512]
+    choices: [32, 64, 128, 256, 512]
     target: config
     config_updates:
       - config: finetune
@@ -115,7 +112,7 @@ parameters:
 
   grad_clip:
     suggest: categorical
-    choices: [0.0, 0.5, 1.0, 5.0]
+    choices: [0.0, 1.0, 5.0]
     target: config
     config_updates:
       - config: train
@@ -131,9 +128,25 @@ parameters:
       - config: finetune
         key: finetune.early_stop_patience
 
+  n_layer:
+    suggest: categorical
+    choices: [1, 2, 4, 6, 12]
+    target: config
+    config_updates:
+      - config: finetune
+        key: eeg_model.n_layer
+
+  dropout:
+    suggest: categorical
+    choices: [0.1, 0.2, 0.3, 0.5]
+    target: config
+    config_updates:
+      - config: finetune
+        key: finetune.dropout
+
 parameter_groups:
   pretrain: [train_epochs, pretrain_batch_size, pretrain_lr, weight_decay, min_lr, grad_clip]
-  finetune: [train_epochs, finetune_batch_size, finetune_lr, weight_decay, min_lr, hidden_dim, grad_clip, early_stop_patience]
+  finetune: [finetune_batch_size]
 
 modes:
   full:
@@ -144,10 +157,10 @@ modes:
   finetune_only:
     study_name: optuna_ds002338_finetune_only
     output_dir: outputs/optuna/ds002338_finetune_only
-    static_args: [-SkipPretrain]
+    static_args: [--skip-pretrain]
     metric:
       path: finetune/loso_finetune_summary.csv
-      column: macro_f1
+      column: accuracy
       row_filter:
         fold: CROSS_FOLD_MEAN_STD
     parameter_groups: [finetune]
@@ -155,7 +168,7 @@ modes:
   pretrain_only:
     study_name: optuna_ds002338_pretrain_only
     output_dir: outputs/optuna/ds002338_pretrain_only
-    static_args: [-SkipFinetune]
+    static_args: [--skip-finetune]
     metric:
       type: json
       path: contrastive/final_metrics.json

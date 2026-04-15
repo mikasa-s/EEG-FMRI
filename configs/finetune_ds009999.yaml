@@ -1,9 +1,9 @@
 train:
   force_cpu: false
   gpu_count: 1
-  gpu_ids: []
-  batch_size: 64
-  eval_batch_size: 64
+  gpu_ids: [3]
+  batch_size: 128
+  eval_batch_size: 128
   num_workers: 4
   pin_memory: true
 
@@ -29,7 +29,7 @@ eeg_model:
   shared_dim: 256
   private_dim: 256
   band_power_dim: 5
-  n_layer: 12
+  n_layer: 2
   nhead: 8
   freeze_backbone: false
 
@@ -46,35 +46,35 @@ fmri_model:
   depths: [2, 2, 6, 2]
   num_heads: [3, 6, 12, 24]
   c_multiplier: 2
-  last_layer_full_MSA: false
+  last_layer_full_MSA: true
   attn_drop_rate: 0.0
   freeze_backbone: false
 
 finetune:
   output_dir: outputs/ds009999/finetune/fold_ds009999_sub01
-  contrastive_checkpoint_path: ""
+  contrastive_checkpoint_path: "pretrained_weights/contrastive_best.pth"
   num_classes: 3
-  selection_metric: macro_f1
+  selection_metric: accuracy
   fusion: eeg_only
-  classifier_mode: concat
+  classifier_mode: add
   eeg_baseline:
     enabled: false
     model_name: cbramod
     num_classes: 3
     num_channels: 62
-    num_timepoints: 200
+    num_timepoints: 1600
     load_pretrained_weights: false
     checkpoint_path: ""
   hidden_dim: 256
   head_dropout: 0.0
-  dropout: 0.2
+  dropout: 0.3
   freeze_encoders: false
-  epochs: 30
-  lr: 0.0003
+  epochs: 200 #100
+  lr: 0.00009
   min_lr: 0.00001
   weight_decay: 0.01
   grad_clip: 1.0
-  early_stop_patience: 10
+  early_stop_patience: 35
   early_stop_min_delta: 0.0
   use_amp: true
   amp_dtype: fp16

@@ -2,11 +2,11 @@ train:
   output_dir: outputs/joint_barlow_twins/pretrain
   force_cpu: false
   gpu_count: 1
-  gpu_ids: [3]
+  gpu_ids: [4]
   epochs: 200
   batch_size: 512
   eval_batch_size: 512
-  num_workers: 8
+  num_workers: 4
   pin_memory: true
   lr: 0.0001
   min_lr: 0.00005
@@ -53,7 +53,7 @@ eeg_model:
   shared_dim: 256
   private_dim: 256
   band_power_dim: 5
-  n_layer: 6
+  n_layer: 12
   nhead: 8
   freeze_backbone: false
 

@@ -5,59 +5,60 @@ study:
   n_trials: 20
   output_dir: outputs/optuna/ds002739
   command:
-    - bash
-    - scripts_linux/run_optuna_pretrain_and_finetune.sh
+  - bash
+  - scripts_linux/run_optuna_pretrain_and_finetune.sh
   static_args:
-    - --target-dataset
-    - ds002739
-    - --pretrain-datasets
-    - ds002336,ds002338,ds002739
+  - --target-dataset
+  - ds002739
+  - --pretrain-datasets
+  - ds002336,ds002338,ds002739
   output_arg: --output-root
-
 runtime_configs:
   train_base: configs/train_joint_contrastive.yaml
   finetune_base: configs/finetune_ds002739.yaml
   train_arg: --joint-train-config
   finetune_arg: --finetune-config
-
 metric:
   type: csv
   path: finetune/loso_finetune_summary.csv
   column: accuracy
   row_filter:
     fold: CROSS_FOLD_MEAN_STD
-
 parameters:
   train_epochs:
     suggest: categorical
-    choices: [10, 20, 30]
+    choices:
+    - 10
+    - 20
+    - 30
     target: config
     config_updates:
-      - config: train
-        key: train.epochs
-      - config: finetune
-        key: finetune.epochs
-
+    - config: train
+      key: train.epochs
+    - config: finetune
+      key: finetune.epochs
   pretrain_batch_size:
     suggest: categorical
-    choices: [32, 64]
+    choices:
+    - 32
+    - 64
     target: config
     config_updates:
-      - config: train
-        key: train.batch_size
-      - config: train
-        key: train.eval_batch_size
-
+    - config: train
+      key: train.batch_size
+    - config: train
+      key: train.eval_batch_size
   finetune_batch_size:
     suggest: categorical
-    choices: [32, 64]
+    choices:
+    - 32
+    - 64
     target: config
     config_updates:
-      - config: finetune
-        key: train.batch_size
-      - config: finetune
-        key: train.eval_batch_size
-
+    - config: finetune
+      key: train.batch_size
+    - config: finetune
+      key: train.eval_batch_size
   pretrain_lr:
     suggest: float
     low: 1e-4
@@ -65,9 +66,8 @@ parameters:
     log: true
     target: config
     config_updates:
-      - config: train
-        key: train.lr
-
+    - config: train
+      key: train.lr
   finetune_lr:
     suggest: float
     low: 1e-5
@@ -75,9 +75,8 @@ parameters:
     log: true
     target: config
     config_updates:
-      - config: finetune
-        key: finetune.lr
-
+    - config: finetune
+      key: finetune.lr
   weight_decay:
     suggest: float
     low: 1e-6
@@ -85,11 +84,10 @@ parameters:
     log: true
     target: config
     config_updates:
-      - config: train
-        key: train.weight_decay
-      - config: finetune
-        key: finetune.weight_decay
-
+    - config: train
+      key: train.weight_decay
+    - config: finetune
+      key: finetune.weight_decay
   min_lr:
     suggest: float
     low: 1e-7
@@ -97,81 +95,107 @@ parameters:
     log: true
     target: config
     config_updates:
-      - config: train
-        key: train.min_lr
-      - config: finetune
-        key: finetune.min_lr
-
+    - config: train
+      key: train.min_lr
+    - config: finetune
+      key: finetune.min_lr
   hidden_dim:
     suggest: categorical
-    choices: [128, 256, 512]
+    choices:
+    - 128
+    - 256
+    - 512
     target: config
     config_updates:
-      - config: finetune
-        key: finetune.hidden_dim
-
+    - config: finetune
+      key: finetune.hidden_dim
   grad_clip:
     suggest: categorical
-    choices: [0.0, 0.5, 1.0, 5.0]
+    choices:
+    - 0.0
+    - 0.5
+    - 1.0
+    - 5.0
     target: config
     config_updates:
-      - config: train
-        key: train.grad_clip
-      - config: finetune
-        key: finetune.grad_clip
-
+    - config: train
+      key: train.grad_clip
+    - config: finetune
+      key: finetune.grad_clip
   early_stop_patience:
     suggest: categorical
-    choices: [2, 3, 5, 8]
+    choices:
+    - 2
+    - 3
+    - 5
+    - 8
     target: config
     config_updates:
-      - config: finetune
-        key: finetune.early_stop_patience
-
+    - config: finetune
+      key: finetune.early_stop_patience
   n_layer:
     suggest: categorical
-    choices: [2, 4, 6]
+    choices:
+    - 2
+    - 4
+    - 6
     target: config
     config_updates:
-      - config: finetune
-        key: eeg_model.n_layer
-
+    - config: finetune
+      key: eeg_model.n_layer
   dropout:
     suggest: categorical
-    choices: [0.1, 0.2, 0.3, 0.5]
+    choices:
+    - 0.1
+    - 0.2
+    - 0.3
+    - 0.5
     target: config
     config_updates:
-      - config: finetune
-        key: finetune.dropout
-
+    - config: finetune
+      key: finetune.dropout
 parameter_groups:
-  pretrain: [train_epochs, pretrain_batch_size, pretrain_lr, weight_decay, min_lr, grad_clip]
-  finetune: [finetune_lr, weight_decay, min_lr, hidden_dim, n_layer]
-
+  pretrain:
+  - train_epochs
+  - pretrain_batch_size
+  - pretrain_lr
+  - weight_decay
+  - min_lr
+  - grad_clip
+  finetune:
+  - finetune_lr
+  - weight_decay
+  - min_lr
+  - hidden_dim
+  - n_layer
 modes:
   full:
     study_name: optuna_ds002739_full
     output_dir: outputs/optuna/ds002739_full
-    parameter_groups: [pretrain, finetune]
-
+    parameter_groups:
+    - pretrain
+    - finetune
   finetune_only:
     study_name: optuna_ds002739_finetune_only
     output_dir: outputs/optuna/ds002739_finetune_only
-    static_args: [--skip-pretrain]
+    static_args:
+    - --skip-pretrain
     metric:
       path: finetune/loso_finetune_summary.csv
-      column: macro_f1
+      column: accuracy
       row_filter:
         fold: CROSS_FOLD_MEAN_STD
-    parameter_groups: [finetune]
-
+    parameter_groups:
+    - finetune
   pretrain_only:
     study_name: optuna_ds002739_pretrain_only
     output_dir: outputs/optuna/ds002739_pretrain_only
-    static_args: [--skip-finetune]
+    static_args:
+    - --skip-finetune
     metric:
       type: json
       path: contrastive/final_metrics.json
       key: best_score
       transform: negate
-    parameter_groups: [pretrain]
+    parameter_groups:
+    - pretrain

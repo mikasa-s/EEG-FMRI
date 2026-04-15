@@ -1,7 +1,7 @@
 train:
   force_cpu: false
   gpu_count: 1
-  gpu_ids: []
+  gpu_ids: [4]
   batch_size: 128
   eval_batch_size: 128
   num_workers: 4
@@ -13,7 +13,7 @@ data:
   test_manifest_csv: cache/ds002739/loso_subjectwise/fold_ds002739_sub01/manifest_test.csv
   root_dir: cache/ds002739
   preload_dataset: false
-  eeg_channel_subset: none
+  eeg_channel_subset: auto
   eeg_channel_target_manifest: cache/ds002739/eeg_channels_target.csv
   expected_eeg_shape: [53, 4, 200]
   expected_fmri_shape: [48, 48, 48, 1]
@@ -63,9 +63,9 @@ finetune:
   output_dir: outputs/ds002739/finetune/fold_ds002739_sub01
   contrastive_checkpoint_path: ""
   num_classes: 2
-  selection_metric: macro_f1
+  selection_metric: accuracy
   fusion: eeg_only
-  classifier_mode: concat
+  classifier_mode: add
   eeg_baseline:
     enabled: false
     model_name: cbramod
@@ -75,14 +75,14 @@ finetune:
     load_pretrained_weights: false
     checkpoint_path: ""
   hidden_dim: 256
-  dropout: 0.2
+  dropout: 0.3
   freeze_encoders: false
-  epochs: 20
+  epochs: 100
   lr: 0.0003
   min_lr: 0.00001
   weight_decay: 0.01
   grad_clip: 1.0
-  early_stop_patience: 10
+  early_stop_patience: 20
   early_stop_min_delta: 0.0
   use_amp: true
   amp_dtype: fp16

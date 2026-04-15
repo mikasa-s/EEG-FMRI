@@ -1,9 +1,9 @@
 train:
   force_cpu: false
   gpu_count: 1
-  gpu_ids: []
-  batch_size: 16
-  eval_batch_size: 32
+  gpu_ids: [6]
+  batch_size: 128
+  eval_batch_size: 128
   num_workers: 4
   pin_memory: true
 
@@ -38,13 +38,13 @@ eeg_model:
   shared_dim: 256
   private_dim: 256
   band_power_dim: 5
-  n_layer: 12
+  n_layer: 6
   nhead: 8
   freeze_backbone: false
 
 fmri_model:
   backbone: neurostorm
-  checkpoint_path: ""
+  checkpoint_path: "pretrained_weights/pt_neurostorm_mae_ratio0.5.ckpt"
   shared_dim: 256
   img_size: [48, 48, 48, 1]
   in_chans: 1
@@ -63,26 +63,26 @@ finetune:
   output_dir: outputs/ds002338/finetune/fold_ds002338_sub01
   contrastive_checkpoint_path: ""
   num_classes: 2
-  selection_metric: macro_f1
+  selection_metric: accuracy
   fusion: eeg_only
-  classifier_mode: concat
+  classifier_mode: add
   eeg_baseline:
     enabled: false
     model_name: cbramod
     num_classes: 2
     num_channels: 63
-    num_timepoints: 200
+    num_timepoints: 1600
     load_pretrained_weights: false
     checkpoint_path: ""
-  hidden_dim: 256
-  dropout: 0.2
+  hidden_dim: 512
+  dropout: 0.3
   freeze_encoders: false
-  epochs: 1
-  lr: 0.0005
-  min_lr: 0.00005
-  weight_decay: 0.01
-  grad_clip: 1.0
-  early_stop_patience: 10
+  epochs: 200
+  lr: 7.870238885014188e-05
+  min_lr: 2.0e-06
+  weight_decay: 1.0e-05
+  grad_clip: 0.0
+  early_stop_patience: 35
   early_stop_min_delta: 0.0
   use_amp: true
   amp_dtype: fp16

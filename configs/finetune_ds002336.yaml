@@ -1,7 +1,7 @@
 train:
   force_cpu: false
   gpu_count: 1
-  gpu_ids: [7]
+  gpu_ids: [4]
   batch_size: 32
   eval_batch_size: 32
   num_workers: 4
@@ -29,7 +29,7 @@ data:
   fmri_normalize_nonzero_only: true
 
 eeg_model:
-  checkpoint_path: ""
+  checkpoint_path: "pretrained_weights/contrastive_best.pth" # 
   in_dim: 200
   out_dim: 200
   d_model: 200
@@ -38,17 +38,17 @@ eeg_model:
   shared_dim: 256
   private_dim: 256
   band_power_dim: 5
-  n_layer: 12
+  n_layer: 6
   nhead: 8
   freeze_backbone: false
 
 fmri_model:
   backbone: neurostorm
-  checkpoint_path: ""
+  checkpoint_path: "pretrained_weights/pt_neurostorm_mae_ratio0.5.ckpt"
   shared_dim: 256
   img_size: [48, 48, 48, 1]
   in_chans: 1
-  embed_dim: 24
+  embed_dim: 36
   first_window_size: [2, 2, 2, 2]
   window_size: [4, 4, 4, 4]
   patch_size: [6, 6, 6, 1]
@@ -63,26 +63,26 @@ finetune:
   output_dir: outputs/ds002336/finetune/fold_ds002336_sub01
   contrastive_checkpoint_path: ""
   num_classes: 2
-  selection_metric: macro_f1
+  selection_metric: accuracy
   fusion: eeg_only
-  classifier_mode: concat
+  classifier_mode: add
   eeg_baseline:
     enabled: false
-    model_name: cbramod
+    model_name: eegnet # 7 个选项：svm, labram, cbramod, eeg_deformer, eegnet, conformer
     num_classes: 2
     num_channels: 63
     num_timepoints: 200
     load_pretrained_weights: false
     checkpoint_path: ""
   hidden_dim: 128
-  dropout: 0.5
+  dropout: 0.3
   freeze_encoders: false
-  epochs: 100
-  lr: 0.0001
-  min_lr: 0.00005
+  epochs: 200
+  lr: 3.3444564916820124e-05
+  min_lr: 5.0e-05
   weight_decay: 0.01
   grad_clip: 1.0
-  early_stop_patience: 50
+  early_stop_patience: 35
   early_stop_min_delta: 0.0
   use_amp: true
   amp_dtype: fp16

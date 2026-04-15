@@ -7,6 +7,14 @@ import numpy as np
 import torch
 
 
+TITLE_FONTSIZE = 15
+LABEL_FONTSIZE = 13
+TICK_FONTSIZE = 11
+LEGEND_FONTSIZE = 11
+ANNOTATION_FONTSIZE = 11
+COLORBAR_TICK_FONTSIZE = 11
+
+
 def _ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -73,10 +81,11 @@ def save_shared_private_tsne(
     for label in ["EEG shared", "EEG private", "fMRI shared"]:
         mask = np.array([item == label for item in labels], dtype=bool)
         ax.scatter(coords[mask, 0], coords[mask, 1], s=18, alpha=0.75, label=label, c=color_map[label])
-    ax.set_title("t-SNE of EEG/FMRI Shared-Private Representations")
-    ax.set_xlabel("t-SNE 1")
-    ax.set_ylabel("t-SNE 2")
-    ax.legend(frameon=False)
+    ax.set_title("t-SNE of EEG/FMRI Shared-Private Representations", fontsize=TITLE_FONTSIZE)
+    ax.set_xlabel("t-SNE 1", fontsize=LABEL_FONTSIZE)
+    ax.set_ylabel("t-SNE 2", fontsize=LABEL_FONTSIZE)
+    ax.tick_params(axis="both", labelsize=TICK_FONTSIZE)
+    ax.legend(frameon=False, fontsize=LEGEND_FONTSIZE)
     fig.tight_layout()
     fig.savefig(output, bbox_inches="tight")
     plt.close(fig)
@@ -118,12 +127,14 @@ def save_cross_modal_similarity_heatmap(
     _ensure_parent(output)
     fig, ax = plt.subplots(figsize=(8, 7), dpi=160)
     im = ax.imshow(sim_np, cmap="coolwarm", vmin=0.5, vmax=1.0, aspect="auto")
-    ax.set_title("Cross-Modal Similarity Heatmap (EEG shared vs fMRI shared)")
-    ax.set_xlabel("fMRI sample index")
-    ax.set_ylabel("EEG sample index")
+    ax.set_title("Cross-Modal Similarity Heatmap (EEG shared vs fMRI shared)", fontsize=TITLE_FONTSIZE)
+    ax.set_xlabel("fMRI sample index", fontsize=LABEL_FONTSIZE)
+    ax.set_ylabel("EEG sample index", fontsize=LABEL_FONTSIZE)
+    ax.tick_params(axis="both", labelsize=TICK_FONTSIZE)
     diag_count = min(sim_np.shape[0], sim_np.shape[1])
     ax.plot(np.arange(diag_count), np.arange(diag_count), color="black", linewidth=0.8, linestyle="--")
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    colorbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    colorbar.ax.tick_params(labelsize=COLORBAR_TICK_FONTSIZE)
     fig.tight_layout()
     fig.savefig(output, bbox_inches="tight")
     plt.close(fig)
@@ -176,11 +187,12 @@ def save_finetune_loss_curve(
     ax.plot(epochs, train_loss, color="#1f77b4", linewidth=2.0, label="Train loss")
     if val_epochs and val_loss:
         ax.plot(val_epochs, val_loss, color="#d62728", linewidth=1.8, linestyle="--", label="Val loss")
-    ax.set_title(title or "Finetune Loss Curve")
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Loss")
+    ax.set_title(title or "Finetune Loss Curve", fontsize=TITLE_FONTSIZE)
+    ax.set_xlabel("Epoch", fontsize=LABEL_FONTSIZE)
+    ax.set_ylabel("Loss", fontsize=LABEL_FONTSIZE)
+    ax.tick_params(axis="both", labelsize=TICK_FONTSIZE)
     ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.5)
-    ax.legend(frameon=False)
+    ax.legend(frameon=False, fontsize=LEGEND_FONTSIZE)
     fig.tight_layout()
     fig.savefig(output, bbox_inches="tight")
     plt.close(fig)
@@ -204,6 +216,7 @@ def save_confusion_matrix(
 ) -> dict[str, Any]:
     try:
         import matplotlib.pyplot as plt
+        import matplotlib.patheffects as pe
     except ImportError as exc:
         raise ModuleNotFoundError(
             "Confusion matrix visualization requires matplotlib."
@@ -238,13 +251,14 @@ def save_confusion_matrix(
     _ensure_parent(output)
     fig, ax = plt.subplots(figsize=(7, 6), dpi=160)
     im = ax.imshow(display_matrix, cmap="Blues", aspect="auto")
-    ax.set_title(title or "Confusion Matrix")
-    ax.set_xlabel("Predicted label")
-    ax.set_ylabel("True label")
+    ax.set_title(title or "Confusion Matrix", fontsize=TITLE_FONTSIZE)
+    ax.set_xlabel("Predicted label", fontsize=LABEL_FONTSIZE)
+    ax.set_ylabel("True label", fontsize=LABEL_FONTSIZE)
     ax.set_xticks(np.arange(num_classes))
     ax.set_yticks(np.arange(num_classes))
-    ax.set_xticklabels(class_names, rotation=0, ha="center")
-    ax.set_yticklabels(class_names)
+    ax.set_xticklabels(class_names, rotation=0, ha="center", fontsize=TICK_FONTSIZE)
+    ax.set_yticklabels(class_names, fontsize=TICK_FONTSIZE)
+    ax.tick_params(axis="both", labelsize=TICK_FONTSIZE)
 
     for row in range(num_classes):
         for col in range(num_classes):
@@ -253,17 +267,21 @@ def save_confusion_matrix(
                 text_value = f"{value:.2f}"
             else:
                 text_value = str(int(matrix[row, col]))
-            ax.text(
+            text = ax.text(
                 col,
                 row,
                 text_value,
                 ha="center",
                 va="center",
                 color="white" if value > display_matrix.max() * 0.5 else "black",
-                fontsize=9,
+                fontsize=ANNOTATION_FONTSIZE,
+                fontweight="semibold",
             )
+            if value > display_matrix.max() * 0.5:
+                text.set_path_effects([pe.Stroke(linewidth=1.8, foreground="black"), pe.Normal()])
 
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    colorbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    colorbar.ax.tick_params(labelsize=COLORBAR_TICK_FONTSIZE)
     fig.tight_layout()
     fig.savefig(output, bbox_inches="tight")
     vector_output = output.with_suffix(".svg")

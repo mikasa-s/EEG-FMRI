@@ -219,7 +219,7 @@ class ContrastiveTrainer:
 
     def load_checkpoint(self, checkpoint_path: Path) -> None:
         """恢复模型、优化器和学习率调度器状态。"""
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         model_state = checkpoint["model"]
         if hasattr(self.model, "module"):
             self.model.module.load_state_dict(model_state, strict=False)

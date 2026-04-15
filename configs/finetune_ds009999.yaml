@@ -13,7 +13,7 @@ data:
   test_manifest_csv: cache/ds009999/loso_subjectwise/fold_ds009999_sub01/manifest_test.csv
   root_dir: cache/ds009999
   preload_dataset: false
-  eeg_channel_subset: auto
+  eeg_channel_subset: none
   eeg_channel_target_manifest: cache/ds009999/eeg_channels_target.csv
   expected_eeg_shape: [62, 8, 200]
   normalize_eeg: true

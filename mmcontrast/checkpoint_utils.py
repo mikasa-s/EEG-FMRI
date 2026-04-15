@@ -10,7 +10,7 @@ import torch
 
 def load_checkpoint_file(checkpoint_path: str):
     """从磁盘读取 checkpoint 原始对象。"""
-    return torch.load(checkpoint_path, map_location="cpu")
+    return torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
 
 def extract_state_dict(checkpoint, preferred_keys: Iterable[str] | None = None) -> OrderedDict[str, torch.Tensor]:

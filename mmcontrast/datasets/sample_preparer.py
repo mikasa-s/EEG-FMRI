@@ -75,7 +75,7 @@ class PairedSamplePreparer:
         elif suffix == ".npz":
             array = np.load(path)["arr_0"]
         elif suffix == ".pt":
-            array = torch.load(path, map_location="cpu")
+            array = torch.load(path, map_location="cpu", weights_only=True)
             if isinstance(array, torch.Tensor):
                 array = array.numpy()
             else:

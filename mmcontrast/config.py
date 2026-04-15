@@ -44,7 +44,7 @@ def _load_array_shape(sample_path: Path) -> tuple[int, ...]:
             first_key = data.files[0]
             return tuple(data[first_key].shape)
     if suffix == ".pt":
-        tensor = torch.load(sample_path, map_location="cpu")
+        tensor = torch.load(sample_path, map_location="cpu", weights_only=True)
         if hasattr(tensor, "shape"):
             return tuple(int(dim) for dim in tensor.shape)
         raise ValueError(f"PT sample does not expose shape: {sample_path}")

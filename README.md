@@ -165,6 +165,23 @@ finetune:
 
 则当前代码会直接使用 pretrained EEG backbone 特征做分类，不会强行使用未初始化的 `shared/private` 头。
 
+如果希望微调阶段按离线预训练模式自动定位权重，可在配置里直接写：
+
+```yaml
+finetune:
+  contrastive_checkpoint_path: ""
+  pretrain_mode: strict
+  pretrain_objective: contrastive
+  pretrain_output_root: pretrained_weights
+```
+
+说明：
+
+- `pretrain_mode=full|strict` 控制自动查找哪一类离线预训练权重
+- `pretrain_objective` 可选 `contrastive`、`infonce`、`barlow_twins`
+- 如果命令行没有手动传 `--contrastive-checkpoint`，则会按这里的设置自动定位 checkpoint
+- 默认配置中 `ds002336`、`ds002338` 使用 `strict`，`ds009999` 使用 `full`
+
 ### 5. EEG baseline 配置
 
 最小配置示例：
@@ -265,6 +282,19 @@ python preprocess\compute_eeg_band_power_targets.py --manifest-csv cache\joint_c
 python run_pretrain.py --config configs\train_joint_contrastive.yaml
 ```
 
+离线预训练现在支持两种模式：
+
+- `full`：直接使用 `cache\joint_contrastive\manifest_all.csv` 中的全部样本做联合预训练。
+- `strict`：仍然直接使用现有 `cache\joint_contrastive` 缓存，不重新做预处理；只是在启动预训练时，从 `manifest_all.csv` 中排除“目标数据集中的目标测试被试”，生成一份临时过滤 manifest，再用这份 manifest 做预训练。
+- 预训练权重默认写到 `pretrained_weights`：`full` 写到 `pretrained_weights\full\<objective>`，`strict` 写到 `pretrained_weights\strict\<dataset>\<subject>\<objective>`。
+- 如果 `strict` 只传 `--target-dataset`，程序会自动从 `cache\joint_contrastive\manifest_all.csv` 中找出该数据集的全部被试，并连续为每个被试各跑一次 strict 预训练。
+
+例如，对整个 `ds002336` 生成 strict 预训练权重：
+
+```powershell
+python run_pretrain.py --config configs\train_joint_contrastive.yaml --pretrain-mode strict --target-dataset ds002336
+```
+
 Pure InfoNCE baseline：
 
 ```powershell
@@ -291,6 +321,7 @@ python run_finetune.py --config configs\finetune_ds009999.yaml --loso --root-dir
 - 加 `--loso`：自动遍历 `<root_dir>\loso_subjectwise\fold_*`，并在输出目录下生成 `loso_finetune_summary.csv`
 - 如需自定义 LOSO 划分目录，可额外传 `--split-root`
 - 因此 `ds009999` 的常规微调和 Optuna 微调都直接推荐使用 `run_finetune.py`
+- 微调阶段仍与预训练解耦；如果没有手动传 `--contrastive-checkpoint`，则会按配置中的 `finetune.pretrain_mode` 自动定位对应预训练权重。默认配置中 `ds002336`、`ds002338` 使用 `strict`，`ds009999` 使用 `full`
 
 如果只想临时跑单 fold，可再补充：
 
@@ -446,6 +477,19 @@ python preprocess/compute_eeg_band_power_targets.py --manifest-csv cache/joint_c
 python run_pretrain.py --config configs/train_joint_contrastive.yaml
 ```
 
+离线预训练现在支持两种模式：
+
+- `full`：直接使用 `cache/joint_contrastive/manifest_all.csv` 中的全部样本做联合预训练。
+- `strict`：仍然直接使用现有 `cache/joint_contrastive` 缓存，不重新做预处理；只是在启动预训练时，从 `manifest_all.csv` 中排除“目标数据集中的目标测试被试”，生成一份临时过滤 manifest，再用这份 manifest 做预训练。
+- 预训练权重默认写到 `pretrained_weights`：`full` 写到 `pretrained_weights/full/<objective>`，`strict` 写到 `pretrained_weights/strict/<dataset>/<subject>/<objective>`。
+- 如果 `strict` 只传 `--target-dataset`，程序会自动从 `cache/joint_contrastive/manifest_all.csv` 中找出该数据集的全部被试，并连续为每个被试各跑一次 strict 预训练。
+
+例如，对整个 `ds002336` 生成 strict 预训练权重：
+
+```bash
+python run_pretrain.py --config configs/train_joint_contrastive.yaml --pretrain-mode strict --target-dataset ds002336
+```
+
 Pure InfoNCE baseline：
 
 ```bash
@@ -472,6 +516,7 @@ python run_finetune.py --config configs/finetune_ds009999.yaml --loso --root-dir
 - 加 `--loso`：自动遍历 `<root_dir>/loso_subjectwise/fold_*`，并在输出目录下生成 `loso_finetune_summary.csv`
 - 如需自定义 LOSO 划分目录，可额外传 `--split-root`
 - 因此 `ds009999` 的常规微调和 Optuna 微调都直接推荐使用 `run_finetune.py`
+- 微调阶段仍与预训练解耦；如果没有手动传 `--contrastive-checkpoint`，则会按配置中的 `finetune.pretrain_mode` 自动定位对应预训练权重。默认配置中 `ds002336`、`ds002338` 使用 `strict`，`ds009999` 使用 `full`
 
 如果只想临时跑单 fold，可再补充：
 

@@ -1,5 +1,5 @@
 train:
-  output_dir: outputs/joint_infonce/pretrain
+  output_dir: pretrained_weights/full/infonce
   force_cpu: false
   gpu_count: 1
   gpu_ids: [4]

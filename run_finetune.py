@@ -14,6 +14,14 @@ from pathlib import Path
 import yaml
 
 from mmcontrast.finetune_runner import run_finetuning
+from mmcontrast.pretrain_pathing import (
+    FULL_MODE,
+    STRICT_MODE,
+    infer_held_out_subject_from_fold_name,
+    infer_held_out_subject_from_manifest,
+    infer_target_dataset_from_root_dir,
+    resolve_pretrain_checkpoint_path,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 # 允许直接从项目根目录执行脚本，而不依赖外部 PYTHONPATH 配置。
@@ -33,6 +41,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--root-dir", type=str, default="")
     parser.add_argument("--output-dir", type=str, default="")
     parser.add_argument("--contrastive-checkpoint", type=str, default="")
+    parser.add_argument("--pretrain-mode", type=str, choices=[FULL_MODE, STRICT_MODE], default="")
+    parser.add_argument("--pretrain-objective", type=str, default="contrastive", help="Objective subdir name used for offline pretrain checkpoints.")
+    parser.add_argument("--pretrain-output-root", type=str, default="", help="Optional pretrain outputs root override used with --pretrain-mode.")
+    parser.add_argument("--target-dataset", type=str, default="", help="Optional target dataset override for strict offline pretrain resolution.")
+    parser.add_argument("--held-out-subject", type=str, default="", help="Optional held-out subject override for strict offline pretrain resolution.")
+    parser.add_argument("--pretrain-checkpoint-relpath", type=str, default="checkpoints/best.pth")
     parser.add_argument("--finetune-checkpoint", type=str, default="")
     parser.add_argument("--selection-metric", type=str, default="")
     parser.add_argument("--epochs", type=int, default=None)
@@ -87,6 +101,32 @@ def apply_overrides(config: dict, args: argparse.Namespace) -> dict:
         if token in {"0", "false", "no", "off"}:
             return False
         raise ValueError(f"Invalid boolean value: {raw}")
+
+    finetune_cfg = dict(config.get("finetune", {}) or {})
+    if not str(args.pretrain_mode).strip():
+        args.pretrain_mode = str(finetune_cfg.get("pretrain_mode", "")).strip()
+    if not str(args.pretrain_objective).strip():
+        args.pretrain_objective = str(finetune_cfg.get("pretrain_objective", "")).strip()
+    if not str(args.pretrain_output_root).strip():
+        args.pretrain_output_root = str(finetune_cfg.get("pretrain_output_root", "")).strip()
+    if not str(args.target_dataset).strip():
+        args.target_dataset = str(finetune_cfg.get("target_dataset", "")).strip()
+
+    if (not args.contrastive_checkpoint.strip()) and str(args.pretrain_mode).strip():
+        target_dataset = args.target_dataset.strip() or infer_target_dataset_from_root_dir(args.root_dir.strip() or str((config.get("data", {}) or {}).get("root_dir", "")))
+        held_out_subject = args.held_out_subject.strip()
+        if not held_out_subject and args.test_manifest.strip():
+            held_out_subject = infer_held_out_subject_from_manifest(args.test_manifest.strip())
+        resolved_pretrain_ckpt = resolve_pretrain_checkpoint_path(
+            project_root=PROJECT_ROOT,
+            mode=args.pretrain_mode.strip(),
+            objective_name=args.pretrain_objective.strip() or "contrastive",
+            target_dataset=target_dataset,
+            held_out_subject=held_out_subject,
+            output_root=args.pretrain_output_root.strip(),
+            checkpoint_relpath=args.pretrain_checkpoint_relpath.strip() or "checkpoints/best.pth",
+        )
+        args.contrastive_checkpoint = str(resolved_pretrain_ckpt)
 
     mapping: list[tuple[str, object]] = [
         ("data.train_manifest_csv", args.train_manifest.strip()),
@@ -251,6 +291,10 @@ def run_loso_finetuning(args: argparse.Namespace, source_config_path: Path, base
         fold_args.test_manifest = str((fold_dir / "manifest_test.csv").resolve())
         fold_args.root_dir = str(root_dir)
         fold_args.output_dir = str((output_root / fold_name).resolve())
+        if str(fold_args.pretrain_mode).strip().lower() == STRICT_MODE and not str(fold_args.held_out_subject).strip():
+            fold_args.held_out_subject = infer_held_out_subject_from_fold_name(fold_name)
+        if not str(fold_args.target_dataset).strip():
+            fold_args.target_dataset = infer_target_dataset_from_root_dir(str(root_dir))
 
         fold_config = apply_overrides(copy.deepcopy(base_config), fold_args)
         runtime_config_path = write_runtime_config(fold_config, source_config_path)

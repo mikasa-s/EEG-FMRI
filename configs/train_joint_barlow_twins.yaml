@@ -1,5 +1,5 @@
 train:
-  output_dir: outputs/joint_barlow_twins/pretrain
+  output_dir: pretrained_weights/full/barlow_twins
   force_cpu: false
   gpu_count: 1
   gpu_ids: [4]

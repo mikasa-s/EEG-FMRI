@@ -52,7 +52,10 @@ fmri_model:
 
 finetune:
   output_dir: outputs/ds009999/finetune/fold_ds009999_sub01
-  contrastive_checkpoint_path: "pretrained_weights/contrastive_best.pth"
+  contrastive_checkpoint_path: ""
+  pretrain_mode: full
+  pretrain_objective: contrastive
+  pretrain_output_root: pretrained_weights
   num_classes: 3
   selection_metric: accuracy
   fusion: eeg_only

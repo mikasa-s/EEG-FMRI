@@ -110,6 +110,8 @@ def _validate_manifest_shapes(
     eeg_cfg: dict[str, Any],
     fmri_cfg: dict[str, Any],
     data_cfg: dict[str, Any],
+    require_eeg_validation: bool = True,
+    require_fmri_validation: bool = True,
 ) -> None:
     """确保 manifest 中的样本形状与模型配置一致。"""
     eeg_shape, fmri_shape = _resolve_sample_shapes(manifest_path, root_dir)
@@ -125,7 +127,7 @@ def _validate_manifest_shapes(
         fmri_shape = fmri_shape[1:]
 
     expected_eeg_shape = _normalize_expected_shape(data_cfg.get("expected_eeg_shape"))
-    if expected_eeg_shape is not None and eeg_shape is not None:
+    if require_eeg_validation and expected_eeg_shape is not None and eeg_shape is not None:
         if len(expected_eeg_shape) != len(eeg_shape):
             raise ValueError(
                 f"EEG shape rank mismatch: manifest sample is {eeg_shape}, but data.expected_eeg_shape is {expected_eeg_shape}"
@@ -136,12 +138,12 @@ def _validate_manifest_shapes(
             )
 
     expected_fmri_shape = _normalize_expected_shape(data_cfg.get("expected_fmri_shape"))
-    if expected_fmri_shape is not None and fmri_shape is not None and fmri_shape != expected_fmri_shape:
+    if require_fmri_validation and expected_fmri_shape is not None and fmri_shape is not None and fmri_shape != expected_fmri_shape:
         raise ValueError(
             f"fMRI shape mismatch: manifest sample is {fmri_shape}, but data.expected_fmri_shape is {expected_fmri_shape}"
         )
 
-    if eeg_shape is not None:
+    if require_eeg_validation and eeg_shape is not None:
         if len(eeg_shape) != 3:
             raise ValueError(f"EEG samples must be [C, S, P], but got shape {eeg_shape} from {manifest_path}")
         seq_len = int(eeg_cfg.get("seq_len", eeg_shape[1]))
@@ -155,7 +157,7 @@ def _validate_manifest_shapes(
                 f"EEG patch length mismatch: manifest sample patch length is {eeg_shape[2]}, but eeg_model.in_dim is {in_dim}"
             )
 
-    if fmri_shape is not None:
+    if require_fmri_validation and fmri_shape is not None:
         fmri_input_type = str(data_cfg.get("fmri_input_type", "volume")).strip().lower()
         if fmri_input_type == "matrix":
             if len(fmri_shape) == 3:
@@ -260,13 +262,21 @@ class TrainConfig:
         eeg_cfg = self.section("eeg_model")
         fmri_cfg = self.section("fmri_model")
         train_cfg = self.section("train")
+        finetune_cfg = self.section("finetune") if "finetune" in self.raw else {}
+        fusion = str(finetune_cfg.get("fusion", "eeg_only")).strip().lower() if finetune_cfg else ""
+        require_eeg_validation = fusion != "fmri_only"
+        require_fmri_validation = fusion != "eeg_only"
         pretrain_objective = str(train_cfg.get("pretrain_objective", "shared_private")).strip().lower()
         eeg_shared_dim = int(eeg_cfg.get("shared_dim", train_cfg.get("projection_dim", 256)))
         eeg_private_dim = int(eeg_cfg.get("private_dim", eeg_shared_dim))
         eeg_band_power_dim = int(eeg_cfg.get("band_power_dim", 5))
-        fmri_shared_dim = int(fmri_cfg.get("shared_dim", eeg_shared_dim))
+        fmri_shared_dim = int(fmri_cfg.get("shared_dim", eeg_shared_dim)) if require_fmri_validation else eeg_shared_dim
 
-        required_sections = ["train", "data", "eeg_model", "fmri_model"]
+        required_sections = ["train", "data"]
+        if require_eeg_validation:
+            required_sections.append("eeg_model")
+        if require_fmri_validation:
+            required_sections.append("fmri_model")
         for section_name in required_sections:
             if section_name not in self.raw:
                 raise ValueError(f"Missing required config section: {section_name}")
@@ -277,7 +287,7 @@ class TrainConfig:
             raise ValueError("eeg_model.shared_dim and eeg_model.private_dim must be positive")
         if pretrain_objective == "shared_private" and eeg_band_power_dim != 5:
             raise ValueError("eeg_model.band_power_dim must be 5 for the fixed EEG band-power target")
-        if fmri_shared_dim != eeg_shared_dim:
+        if require_fmri_validation and fmri_shared_dim != eeg_shared_dim:
             raise ValueError("fmri_model.shared_dim must match eeg_model.shared_dim for shared InfoNCE")
         train_visualization_cfg = train_cfg.get("visualization", {}) or {}
         online_monitor_cfg = train_visualization_cfg.get("online_monitor", {}) or {}
@@ -316,7 +326,12 @@ class TrainConfig:
         if root_dir is not None and not root_dir.exists():
             raise FileNotFoundError(f"Dataset root_dir not found: {root_dir}")
 
-        for checkpoint_key, cfg_section in [("EEG", eeg_cfg), ("fMRI", fmri_cfg)]:
+        checkpoint_sections: list[tuple[str, dict[str, Any]]] = []
+        if require_eeg_validation:
+            checkpoint_sections.append(("EEG", eeg_cfg))
+        if require_fmri_validation:
+            checkpoint_sections.append(("fMRI", fmri_cfg))
+        for checkpoint_key, cfg_section in checkpoint_sections:
             checkpoint_path = str(cfg_section.get("checkpoint_path", "")).strip()
             if checkpoint_path:
                 resolved = root / checkpoint_path
@@ -330,7 +345,6 @@ class TrainConfig:
                 raise FileNotFoundError(f"Resume checkpoint not found: {resolved}")
 
         if "finetune" in self.raw:
-            finetune_cfg = self.section("finetune")
             eeg_encoder_variant = str(finetune_cfg.get("eeg_encoder_variant", "shared_private")).strip().lower()
             if eeg_encoder_variant not in {"shared_private", "shared_only"}:
                 raise ValueError("finetune.eeg_encoder_variant must be one of: shared_private, shared_only")
@@ -372,7 +386,6 @@ class TrainConfig:
             eeg_baseline_cfg = finetune_cfg.get("eeg_baseline", {}) or {}
             if bool(eeg_baseline_cfg.get("enabled", False)):
                 model_name = str(eeg_baseline_cfg.get("model_name", "cbramod")).strip().lower()
-                fusion = str(finetune_cfg.get("fusion", "eeg_only")).strip().lower()
                 if fusion not in {"eeg_only", "fmri_only", "concat", "add"}:
                     raise ValueError("finetune.fusion must be one of: eeg_only, fmri_only, concat, add")
                 valid_models = {
@@ -408,6 +421,12 @@ class TrainConfig:
                         resolved = root / checkpoint_path
                         if not resolved.exists():
                             raise FileNotFoundError(f"EEG baseline checkpoint not found: {resolved}")
-
-
-        _validate_manifest_shapes(manifest_path=manifest_path, root_dir=root_dir, eeg_cfg=eeg_cfg, fmri_cfg=fmri_cfg, data_cfg=data_cfg)
+        _validate_manifest_shapes(
+            manifest_path=manifest_path,
+            root_dir=root_dir,
+            eeg_cfg=eeg_cfg,
+            fmri_cfg=fmri_cfg,
+            data_cfg=data_cfg,
+            require_eeg_validation=require_eeg_validation,
+            require_fmri_validation=require_fmri_validation,
+        )

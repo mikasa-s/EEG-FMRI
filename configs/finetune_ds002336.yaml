@@ -20,20 +20,11 @@ data:
   eeg_channel_subset: none
   eeg_channel_target_manifest: cache/ds002336/eeg_channels_target.csv
   expected_eeg_shape: [63, 8, 200]
-  expected_fmri_shape: [48, 48, 48, 1]
   normalize_eeg: true
-  normalize_fmri: true
   eeg_scale: 1.0
-  fmri_scale: 1.0
-  fmri_input_type: volume
-  fmri_target_shape: [48, 48, 48, 1]
-  fmri_spatial_strategy: pad_or_crop
-  fmri_temporal_strategy: pad_or_crop
-  fmri_pad_value: 0.0
-  fmri_normalize_nonzero_only: true
 
 eeg_model:
-  checkpoint_path: "" # 
+  checkpoint_path: ""
   in_dim: 200
   out_dim: 200
   d_model: 200
@@ -44,23 +35,6 @@ eeg_model:
   band_power_dim: 5
   n_layer: 6
   nhead: 8
-  freeze_backbone: false
-
-fmri_model:
-  backbone: neurostorm
-  checkpoint_path: ""
-  shared_dim: 256
-  img_size: [48, 48, 48, 1]
-  in_chans: 1
-  embed_dim: 36
-  first_window_size: [2, 2, 2, 2]
-  window_size: [4, 4, 4, 4]
-  patch_size: [6, 6, 6, 1]
-  depths: [2, 2, 6, 2]
-  num_heads: [3, 6, 12, 24]
-  c_multiplier: 2
-  last_layer_full_MSA: true
-  attn_drop_rate: 0.0
   freeze_backbone: false
 
 finetune:

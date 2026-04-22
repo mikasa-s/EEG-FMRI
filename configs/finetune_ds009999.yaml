@@ -34,23 +34,6 @@ eeg_model:
   nhead: 8
   freeze_backbone: false
 
-fmri_model:
-  backbone: neurostorm
-  checkpoint_path: ""
-  shared_dim: 256
-  img_size: [48, 48, 48, 1]
-  in_chans: 1
-  embed_dim: 24
-  first_window_size: [2, 2, 2, 2]
-  window_size: [4, 4, 4, 4]
-  patch_size: [6, 6, 6, 1]
-  depths: [2, 2, 6, 2]
-  num_heads: [3, 6, 12, 24]
-  c_multiplier: 2
-  last_layer_full_MSA: true
-  attn_drop_rate: 0.0
-  freeze_backbone: false
-
 finetune:
   output_dir: outputs/ds009999/finetune/fold_ds009999_sub01
   contrastive_checkpoint_path: ""

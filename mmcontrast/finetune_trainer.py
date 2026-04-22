@@ -84,8 +84,8 @@ class FinetuneTrainer:
         model_cfg = {
             "train": dict(train_cfg),
             "data": dict(data_cfg),
-            "eeg_model": dict(cfg["eeg_model"]),
-            "fmri_model": dict(cfg["fmri_model"]),
+            "eeg_model": dict(cfg.get("eeg_model", {})),
+            "fmri_model": dict(cfg.get("fmri_model", {})),
             "finetune": dict(finetune_cfg),
         }
         eeg_input_shape = self.get_dataset_eeg_shape(train_dataset)

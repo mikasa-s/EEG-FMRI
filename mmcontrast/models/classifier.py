@@ -32,7 +32,7 @@ class EEGfMRIClassifier(nn.Module):
         super().__init__()
         finetune_cfg = cfg["finetune"]
         eeg_cfg = cfg["eeg_model"]
-        fmri_cfg = cfg["fmri_model"]
+        fmri_cfg = cfg.get("fmri_model", {})
         data_cfg = cfg["data"]
         eeg_channel_summary = build_eeg_channel_summary(data_cfg)
 

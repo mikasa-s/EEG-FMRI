@@ -20,6 +20,222 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+ONLINE_MONITOR_CURVE_COMPAT_SCRIPT = """<script>
+(function () {
+  if (window.__cmclCurveCompat) return;
+  window.__cmclCurveCompat = true;
+
+  function collectSeries(items, xKey, yKey) {
+    return (items || [])
+      .filter(function (item) {
+        return item && item[xKey] !== undefined && item[yKey] !== undefined && item[yKey] !== null && !Number.isNaN(Number(item[yKey]));
+      })
+      .map(function (item) {
+        return { x: Number(item[xKey]), y: Number(item[yKey]) };
+      });
+  }
+
+  function ensureSectionLabel(targetId, label) {
+    var target = document.getElementById(targetId);
+    if (!target || !target.parentNode) return;
+    var previous = target.previousElementSibling;
+    if (previous && previous.dataset && previous.dataset.cmclLabel === "true") {
+      previous.textContent = label;
+      return;
+    }
+    if (previous && /loss curve|retrieval|r@1|r@5|projection|pca|t-sne|\?{2,}|[éèå]/i.test((previous.textContent || "").trim())) {
+      previous.textContent = label;
+      previous.dataset.cmclLabel = "true";
+      return;
+    }
+    var heading = document.createElement("h3");
+    heading.textContent = label;
+    heading.dataset.cmclLabel = "true";
+    heading.style.margin = "0 0 10px 0";
+    heading.style.font = '600 16px "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif';
+    heading.style.color = "#25344c";
+    target.parentNode.insertBefore(heading, target);
+  }
+
+  function normalizeTextLabels() {
+    document.title = "Pretrain Online Monitor";
+    ensureSectionLabel("lossCanvas", "训练损失曲线");
+    ensureSectionLabel("lossCurveImage", "训练损失曲线");
+    ensureSectionLabel("retrievalCanvas", "R@1 / R@5 检索曲线");
+    ensureSectionLabel("retrievalCurveImage", "R@1 / R@5 检索曲线");
+
+    var projectionTitle = document.getElementById("projectionTitle");
+    var projectionName = ((window.state && state.projection_title) || "PCA");
+    var desiredProjectionTitle = projectionName + "表征";
+    if (projectionTitle) {
+      projectionTitle.textContent = desiredProjectionTitle;
+    }
+    ensureSectionLabel("tsneImage", desiredProjectionTitle);
+
+    var textNodes = document.querySelectorAll("h1, h2, h3, h4, p, div, span, strong");
+    textNodes.forEach(function (node) {
+      var text = (node.textContent || "").trim();
+      if (!text) return;
+      if (/^Online\s+(PCA|t-SNE|TSNE)\b.*\bepoch\b/i.test(text) || /^Online\s+.*\bepoch\s+\d+\b/i.test(text)) {
+        node.textContent = desiredProjectionTitle;
+      }
+    });
+  }
+
+  function drawChart(canvas, seriesList, title) {
+    if (!canvas || !canvas.getContext) return;
+    var validSeries = (seriesList || []).filter(function (series) {
+      return Array.isArray(series.values) && series.values.length > 0;
+    });
+    var ctx = canvas.getContext("2d");
+    var width = canvas.width || 720;
+    var height = canvas.height || 320;
+    var margin = { top: 28, right: 24, bottom: 38, left: 54 };
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = "#f7f8fa";
+    ctx.fillRect(0, 0, width, height);
+    if (!validSeries.length) {
+      ctx.fillStyle = "#6b7280";
+      ctx.font = '14px "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif';
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("Waiting for data", width / 2, height / 2);
+      return;
+    }
+
+    var xs = [];
+    var ys = [];
+    validSeries.forEach(function (series) {
+      series.values.forEach(function (point) {
+        xs.push(point.x);
+        ys.push(point.y);
+      });
+    });
+
+    var xMin = Math.min.apply(null, xs);
+    var xMax = Math.max.apply(null, xs);
+    var yMinRaw = Math.min.apply(null, ys);
+    var yMaxRaw = Math.max.apply(null, ys);
+    var ySpan = Math.max(1e-6, yMaxRaw - yMinRaw);
+    var yMin = yMinRaw - ySpan * 0.08;
+    var yMax = yMaxRaw + ySpan * 0.08;
+    var chartW = width - margin.left - margin.right;
+    var chartH = height - margin.top - margin.bottom;
+    var xScale = function (x) {
+      return margin.left + ((x - xMin) / Math.max(1, xMax - xMin)) * chartW;
+    };
+    var yScale = function (y) {
+      return margin.top + (1 - (y - yMin) / Math.max(1e-6, yMax - yMin)) * chartH;
+    };
+
+    ctx.strokeStyle = "#d6deea";
+    ctx.lineWidth = 1;
+    ctx.fillStyle = "#5b6578";
+    ctx.font = '12px "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif';
+    for (var i = 0; i < 5; i += 1) {
+      var y = margin.top + (chartH / 4) * i;
+      var tickValue = yMax - ((yMax - yMin) / 4) * i;
+      ctx.beginPath();
+      ctx.moveTo(margin.left, y);
+      ctx.lineTo(width - margin.right, y);
+      ctx.stroke();
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      ctx.fillText(Number(tickValue).toFixed(3), margin.left - 8, y);
+    }
+
+    ctx.strokeStyle = "#25344c";
+    ctx.beginPath();
+    ctx.moveTo(margin.left, margin.top);
+    ctx.lineTo(margin.left, height - margin.bottom);
+    ctx.lineTo(width - margin.right, height - margin.bottom);
+    ctx.stroke();
+    ctx.fillStyle = "#25344c";
+    ctx.font = '14px "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif';
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+    ctx.fillText(title, margin.left, 14);
+    ctx.font = '12px "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif';
+    ctx.fillText(String(xMin), margin.left, height - margin.bottom + 20);
+    ctx.textAlign = "right";
+    ctx.fillText(String(xMax), width - margin.right, height - margin.bottom + 20);
+
+    validSeries.forEach(function (series, index) {
+      ctx.strokeStyle = series.color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      series.values.forEach(function (point, pointIndex) {
+        var x = xScale(point.x);
+        var y = yScale(point.y);
+        if (pointIndex === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      var legendX = margin.left + index * 150;
+      ctx.fillStyle = series.color;
+      ctx.fillRect(legendX, height - 18, 18, 4);
+      ctx.fillStyle = "#374151";
+      ctx.textAlign = "left";
+      ctx.fillText(series.label, legendX + 24, height - 12);
+    });
+  }
+
+  function renderCurvesCompat() {
+    try {
+      normalizeTextLabels();
+      var lossCanvas = document.getElementById("lossCanvas");
+      if (lossCanvas) {
+        drawChart(
+          lossCanvas,
+          [
+            { label: "total", color: "#1d4ed8", values: collectSeries(state.step_history, "global_step", "loss") },
+            { label: "contrastive", color: "#0f766e", values: collectSeries(state.step_history, "global_step", "contrastive_loss") },
+            { label: "band_power", color: "#d97706", values: collectSeries(state.step_history, "global_step", "band_power_loss") },
+            { label: "separation", color: "#b91c1c", values: collectSeries(state.step_history, "global_step", "separation_loss") }
+          ],
+          "训练损失"
+        );
+      }
+
+      var retrievalCanvas = document.getElementById("retrievalCanvas");
+      if (retrievalCanvas) {
+        drawChart(
+          retrievalCanvas,
+          [
+            { label: "R@1", color: "#7c3aed", values: collectSeries(state.epoch_history, "epoch", "mean_r1") },
+            { label: "R@5", color: "#059669", values: collectSeries(state.epoch_history, "epoch", "mean_r5") }
+          ],
+          "R@1 / R@5 检索"
+        );
+      }
+    } catch (error) {
+      console.warn("CMCL monitor curve compat failed", error);
+    }
+  }
+
+  var originalRenderState = typeof renderState === "function" ? renderState : null;
+  if (originalRenderState) {
+    window.renderState = function () {
+      try {
+        originalRenderState();
+      } catch (error) {
+        console.warn("CMCL monitor original renderState failed", error);
+      }
+      renderCurvesCompat();
+    };
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", renderCurvesCompat);
+  } else {
+    renderCurvesCompat();
+  }
+  window.setTimeout(renderCurvesCompat, 0);
+  window.setInterval(renderCurvesCompat, 2000);
+})();
+</script>"""
+
 from mmcontrast.pretrain_pathing import FULL_MODE, STRICT_MODE, infer_pretrain_objective_name, resolve_pretrain_output_dir
 
 
@@ -49,6 +265,14 @@ def list_train_config_summaries() -> list[dict[str, Any]]:
             }
         )
     return summaries
+
+
+def patch_online_monitor_html(content: str) -> str:
+    if "__cmclCurveCompat" in content:
+        return content
+    if "</body>" in content:
+        return content.replace("</body>", ONLINE_MONITOR_CURVE_COMPAT_SCRIPT + "\n</body>")
+    return content + "\n" + ONLINE_MONITOR_CURVE_COMPAT_SCRIPT
 
 
 @dataclass
@@ -317,8 +541,15 @@ class AppHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_file(self, path: Path) -> None:
-        content = path.read_bytes()
         mime_type, _ = mimetypes.guess_type(str(path))
+        if path.suffix.lower() == ".html":
+            html = path.read_text(encoding="utf-8")
+            if "online_monitor" in {part.lower() for part in path.parts}:
+                html = patch_online_monitor_html(html)
+            content = html.encode("utf-8")
+            mime_type = "text/html; charset=utf-8"
+        else:
+            content = path.read_bytes()
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", mime_type or "application/octet-stream")
         self.send_header("Content-Length", str(len(content)))

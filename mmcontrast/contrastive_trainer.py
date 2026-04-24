@@ -12,7 +12,7 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler, Subset
 
-from .dataset_batching import GroupedBatchSampler
+from .dataset_batching import GroupedBatchSampler, resolve_sample_group_values
 from .datasets import PairedEEGfMRIDataset
 from .distributed import cleanup_distributed, configure_cudnn, configure_runtime_devices, gather_tensor, init_distributed, is_dist_initialized, is_main_process, runtime_summary
 from .losses import BarlowTwinsPretrainLoss, PureInfoNCEPretrainLoss, SharedPrivatePretrainLoss
@@ -74,6 +74,9 @@ class ContrastiveTrainer:
                 f"eeg={train_eeg_shape}, fmri={train_fmri_shape}",
                 flush=True,
             )
+            grouped_shape_summary = self.describe_loader_modal_shapes_by_group(self.train_loader)
+            if grouped_shape_summary:
+                print(f"Per-dataset shapes for pretrain: {grouped_shape_summary}", flush=True)
 
         self.model = self.build_model(cfg)
         if is_main_process():
@@ -136,6 +139,11 @@ class ContrastiveTrainer:
         )
 
         self.grad_clip = float(train_cfg.get("grad_clip", 0.0))
+        self.retrieval_eval_max_samples = max(1, int(train_cfg.get("retrieval_eval_max_samples", 2000) or 2000))
+        self.retrieval_eval_seed = int(train_cfg.get("retrieval_eval_seed", 42) or 42)
+        self._retrieval_eval_force_sampled = False
+        self._retrieval_eval_permutation: list[int] | None = None
+        self._retrieval_eval_seen_indices: set[int] = set()
         self.use_amp = bool(train_cfg.get("use_amp", True))
         self.amp_dtype = str(train_cfg.get("amp_dtype", "fp16"))
         self.scaler = _build_grad_scaler(enabled=self.use_amp and self.amp_dtype == "fp16")
@@ -222,6 +230,32 @@ class ContrastiveTrainer:
         eeg_shape = str([sample_count, *(list(eeg.shape) if hasattr(eeg, "shape") else [])]) if eeg is not None else "None"
         fmri_shape = str([sample_count, *(list(fmri.shape) if hasattr(fmri, "shape") else [])]) if fmri is not None else "None"
         return eeg_shape, fmri_shape
+
+    @staticmethod
+    def describe_loader_modal_shapes_by_group(loader: DataLoader | None) -> str:
+        if loader is None:
+            return ""
+        dataset = loader.dataset
+        try:
+            group_values = resolve_sample_group_values(dataset, "dataset")
+        except Exception:
+            return ""
+        first_indices: dict[str, int] = {}
+        counts: dict[str, int] = {}
+        for index, group_name in enumerate(group_values):
+            group_name = str(group_name)
+            counts[group_name] = counts.get(group_name, 0) + 1
+            if group_name not in first_indices:
+                first_indices[group_name] = index
+        parts: list[str] = []
+        for group_name in sorted(first_indices):
+            sample = dataset[first_indices[group_name]]
+            eeg = sample.get("eeg") if isinstance(sample, dict) else None
+            fmri = sample.get("fmri") if isinstance(sample, dict) else None
+            eeg_shape = [counts[group_name], *(list(eeg.shape) if hasattr(eeg, "shape") else [])] if eeg is not None else [counts[group_name]]
+            fmri_shape = [counts[group_name], *(list(fmri.shape) if hasattr(fmri, "shape") else [])] if fmri is not None else [counts[group_name]]
+            parts.append(f"{group_name}: eeg={eeg_shape}, fmri={fmri_shape}")
+        return "; ".join(parts)
 
     def resolve_path(self, path_str: str) -> Path:
         """把相对路径统一转成基于项目根目录的绝对路径。"""
@@ -420,14 +454,44 @@ class ContrastiveTrainer:
         denom = max(1, len(self.train_loader))
         return {key: value / denom for key, value in running.items()}
 
-    def evaluate_retrieval(self) -> dict[str, float]:
-        """在当前训练集上计算双向检索指标（R@1/R@5）。"""
+    @staticmethod
+    def _is_retrieval_memory_error(exc: RuntimeError) -> bool:
+        message = str(exc).lower()
+        return ("not enough memory" in message) or ("out of memory" in message)
+
+    def _build_retrieval_eval_loader(self, dataset) -> DataLoader:
+        batch_size = int(self.cfg["train"].get("eval_batch_size", self.cfg["train"].get("batch_size", 16)))
+        eval_num_workers = 0
+        if is_main_process():
+            print("Retrieval eval loader: forcing num_workers=0 for stability.", flush=True)
+        return self.build_loader(
+            dataset,
+            batch_size=batch_size,
+            sampler=None,
+            batch_sampler=GroupedBatchSampler(
+                dataset,
+                batch_size=batch_size,
+                group_field="dataset",
+                shuffle=False,
+                drop_last=False,
+                world_size=self.world_size,
+                rank=self.rank,
+                seed=self.retrieval_eval_seed,
+            ),
+            shuffle=False,
+            drop_last=False,
+            num_workers=eval_num_workers,
+            pin_memory=bool(self.cfg["train"].get("pin_memory", True)),
+        )
+
+    def _evaluate_retrieval_on_dataset(self, dataset) -> dict[str, float]:
         self.model.eval()
         gathered_eeg: list[torch.Tensor] = []
         gathered_fmri: list[torch.Tensor] = []
+        retrieval_loader = self._build_retrieval_eval_loader(dataset)
 
         with torch.no_grad():
-            for batch in self.train_loader:
+            for batch in retrieval_loader:
                 eeg = batch["eeg"].to(self.device, non_blocking=True)
                 fmri = batch["fmri"].to(self.device, non_blocking=True)
                 out = self.model(eeg=eeg, fmri=fmri)
@@ -443,6 +507,56 @@ class ContrastiveTrainer:
         eeg_all = torch.cat(gathered_eeg, dim=0)
         fmri_all = torch.cat(gathered_fmri, dim=0)
         return contrastive_retrieval_metrics(eeg_all, fmri_all)
+
+    def _get_retrieval_eval_subset(self, epoch: int):
+        total_samples = len(self.train_dataset)
+        sample_count = min(self.retrieval_eval_max_samples, total_samples)
+        if self._retrieval_eval_permutation is None or len(self._retrieval_eval_permutation) != total_samples:
+            generator = torch.Generator()
+            generator.manual_seed(self.retrieval_eval_seed)
+            self._retrieval_eval_permutation = torch.randperm(total_samples, generator=generator).tolist()
+        start = ((max(1, int(epoch)) - 1) * sample_count) % total_samples
+        end = start + sample_count
+        permutation = self._retrieval_eval_permutation
+        if end <= total_samples:
+            indices = permutation[start:end]
+        else:
+            indices = permutation[start:] + permutation[: end - total_samples]
+        self._retrieval_eval_seen_indices.update(int(index) for index in indices)
+        return Subset(self.train_dataset, indices), {
+            "sample_count": int(sample_count),
+            "total_samples": int(total_samples),
+            "start_offset": int(start),
+            "covered_samples": int(len(self._retrieval_eval_seen_indices)),
+        }
+
+    def evaluate_retrieval(self, epoch: int) -> dict[str, float]:
+        if not self._retrieval_eval_force_sampled:
+            try:
+                return self._evaluate_retrieval_on_dataset(self.train_dataset)
+            except RuntimeError as exc:
+                if not self._is_retrieval_memory_error(exc):
+                    raise
+                self._retrieval_eval_force_sampled = True
+                if is_main_process():
+                    print(
+                        "Retrieval eval full-set OOM: switching to sampled retrieval evaluation. "
+                        f"From now on, each epoch will evaluate {self.retrieval_eval_max_samples} samples with rotating coverage across the whole training set.",
+                        flush=True,
+                    )
+                if self.device.type == "cuda":
+                    torch.cuda.empty_cache()
+
+        subset, subset_info = self._get_retrieval_eval_subset(epoch)
+        if is_main_process():
+            print(
+                "Retrieval eval mode=sampled, "
+                f"epoch={epoch:03d}, sampled={subset_info['sample_count']}/{subset_info['total_samples']}, "
+                f"covered={subset_info['covered_samples']}/{subset_info['total_samples']}, "
+                f"start_offset={subset_info['start_offset']}",
+                flush=True,
+            )
+        return self._evaluate_retrieval_on_dataset(subset)
 
     def fit(self) -> None:
         """执行完整训练流程，并按训练 loss 选择最好 checkpoint。"""
@@ -477,7 +591,7 @@ class ContrastiveTrainer:
                     tsne_report=tsne_report,
                 )
             else:
-                last_retrieval_metrics = self.evaluate_retrieval()
+                last_retrieval_metrics = self.evaluate_retrieval(epoch)
 
             if is_main_process():
                 summary_parts = [

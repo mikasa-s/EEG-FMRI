@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import math
+import re
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -11,7 +13,41 @@ from torch.utils.data._utils.collate import default_collate
 
 from .dataset_batching import resolve_sample_group_values
 from .metrics import contrastive_retrieval_metrics
-from .visualization import save_embedding_groups_pca, save_embedding_groups_tsne
+from .visualization import (
+    save_embedding_groups_pca as _save_embedding_groups_pca,
+    save_embedding_groups_tsne as _save_embedding_groups_tsne,
+)
+
+
+_PROJECTION_TITLE_PATTERN = re.compile(
+    r"^\s*Online\s+(?P<method>PCA|t-SNE|TSNE)\b.*?\bepoch\s+(?P<epoch>\d+)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_projection_title(title: str) -> str:
+    raw = str(title).strip()
+    match = _PROJECTION_TITLE_PATTERN.match(raw)
+    if not match:
+        return raw
+    method = str(match.group("method")).strip()
+    epoch = int(match.group("epoch"))
+    normalized_method = "t-SNE" if method.lower() in {"t-sne", "tsne"} else "PCA"
+    return f"{normalized_method} (epoch {epoch})"
+
+
+def save_embedding_groups_pca(*args, **kwargs):
+    title = kwargs.get("title")
+    if title is not None:
+        kwargs["title"] = _normalize_projection_title(title)
+    return _save_embedding_groups_pca(*args, **kwargs)
+
+
+def save_embedding_groups_tsne(*args, **kwargs):
+    title = kwargs.get("title")
+    if title is not None:
+        kwargs["title"] = _normalize_projection_title(title)
+    return _save_embedding_groups_tsne(*args, **kwargs)
 
 
 def _finite_float(value: Any) -> float | None:
@@ -44,6 +80,10 @@ class PretrainOnlineMonitor:
         self.state_path = self.output_dir / "monitor_state.json"
         self.html_path = self.output_dir / "index.html"
         self.tsne_path = self.output_dir / "tsne_latest.png"
+        self.projection_epoch_dir = self.output_dir / "projection_epochs"
+        self.projection_epoch_dir.mkdir(parents=True, exist_ok=True)
+        self.loss_curve_path = self.output_dir / "loss_curve.png"
+        self.retrieval_curve_path = self.output_dir / "retrieval_curve.png"
         self.max_samples = max(2, int(max_samples))
         self.random_seed = int(random_seed)
         self.tsne_interval_epochs = max(1, int(tsne_interval_epochs))
@@ -86,6 +126,9 @@ class PretrainOnlineMonitor:
             "tsne_report": {},
             "projection_method": self.projection_method,
             "projection_title": self.projection_title,
+            "loss_curve_image": self.loss_curve_path.name,
+            "retrieval_curve_image": self.retrieval_curve_path.name,
+            "projection_epoch_dir": self.projection_epoch_dir.name,
             "status": {
                 "phase": "initialized",
                 "epoch": 0,
@@ -173,6 +216,7 @@ class PretrainOnlineMonitor:
         self.state["latest_retrieval_metrics"] = {key: _finite_float(value) for key, value in retrieval_metrics.items()}
         if tsne_report is not None:
             self.state["tsne_report"] = tsne_report
+        self._save_summary_curves()
         self.state["status"].update({"phase": "epoch_end", "epoch": int(epoch), "step": 0})
         self.write_state()
 
@@ -209,6 +253,68 @@ class PretrainOnlineMonitor:
             model.train()
         return {key: torch.cat(value, dim=0) for key, value in outputs.items() if value}
 
+    def _save_curve_plot(self, series_list: list[dict[str, Any]], output_path: Path, title: str, x_label: str = "Epoch") -> None:
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            return
+        valid_series = []
+        for series in series_list:
+            xs = []
+            ys = []
+            for item in series.get("values", []):
+                x = item.get("x")
+                y = item.get("y")
+                if y is None or (isinstance(y, float) and math.isnan(y)):
+                    continue
+                xs.append(float(x))
+                ys.append(float(y))
+            if xs:
+                valid_series.append({"label": series.get("label", "series"), "color": series.get("color", "#1f77b4"), "x": xs, "y": ys})
+        if not valid_series:
+            return
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig, ax = plt.subplots(figsize=(8, 5), dpi=160)
+        for series in valid_series:
+            ax.plot(series["x"], series["y"], linewidth=2.0, color=series["color"], label=series["label"])
+        ax.set_title(title)
+        ax.set_xlabel(x_label)
+        ax.grid(True, alpha=0.25)
+        ax.legend(frameon=False)
+        fig.tight_layout()
+        fig.savefig(output_path, bbox_inches="tight")
+        plt.close(fig)
+
+    def _save_summary_curves(self) -> None:
+        epoch_history = self.state.get("epoch_history", []) or []
+        self._save_curve_plot(
+            [
+                {
+                    "label": "Total loss",
+                    "color": "#1f77b4",
+                    "values": [{"x": item.get("epoch"), "y": item.get("train_loss")} for item in epoch_history],
+                }
+            ],
+            self.loss_curve_path,
+            title="Train Loss Curve",
+        )
+        self._save_curve_plot(
+            [
+                {
+                    "label": "Mean R@1",
+                    "color": "#2ca02c",
+                    "values": [{"x": item.get("epoch"), "y": item.get("mean_r1")} for item in epoch_history],
+                },
+                {
+                    "label": "Mean R@5",
+                    "color": "#ff7f0e",
+                    "values": [{"x": item.get("epoch"), "y": item.get("mean_r5")} for item in epoch_history],
+                },
+            ],
+            self.retrieval_curve_path,
+            title="Retrieval Curve",
+        )
+
     def evaluate_retrieval(self, model: torch.nn.Module, device: torch.device) -> dict[str, float]:
         outputs = self.collect_subset_outputs(model, device)
         eeg_embed = outputs.get("eeg_embed")
@@ -227,12 +333,13 @@ class PretrainOnlineMonitor:
         }
         if "eeg_private" in outputs:
             groups["EEG private"] = outputs["eeg_private"]
+        epoch_projection_path = self.projection_epoch_dir / f"{self.projection_method}_epoch_{int(epoch):03d}.png"
         if self.projection_method == "pca":
             report = save_embedding_groups_pca(
                 groups,
-                output_path=self.tsne_path,
+                output_path=epoch_projection_path,
                 max_points=self.tsne_max_points,
-                title=f"Online PCA ({self.objective_name})",
+                title=f"Online PCA ({self.objective_name}) epoch {int(epoch):03d}",
                 basis=self._pca_basis,
             )
             if report.get("saved") and isinstance(report.get("basis"), dict):
@@ -240,11 +347,14 @@ class PretrainOnlineMonitor:
         else:
             report = save_embedding_groups_tsne(
                 groups,
-                output_path=self.tsne_path,
+                output_path=epoch_projection_path,
                 max_points=self.tsne_max_points,
                 random_state=self.random_seed,
-                title=f"Online t-SNE ({self.objective_name})",
+                title=f"Online t-SNE ({self.objective_name}) epoch {int(epoch):03d}",
             )
+        if report.get("saved"):
+            shutil.copyfile(epoch_projection_path, self.tsne_path)
+            report["epoch_projection_path"] = str(epoch_projection_path)
         self.state["tsne_version"] = int(self.state.get("tsne_version", 0)) + 1
         return report
 
@@ -371,8 +481,8 @@ class PretrainOnlineMonitor:
   </div>
 
   <div class="grid">
-    <div class="card"><h2>训练损失曲线</h2><canvas id="lossCanvas"></canvas></div>
-    <div class="card"><h2>R@1 / R@5 曲线</h2><canvas id="retrievalCanvas"></canvas></div>
+    <div class="card"><h2>???????</h2><img id="lossCurveImage" alt="loss curve" /></div>
+    <div class="card"><h2>R@1 / R@5 ??</h2><img id="retrievalCurveImage" alt="retrieval curve" /></div>
     <div class="card wide"><h2 id="projectionTitle">固定样本投影</h2><img id="tsneImage" alt="projection" /></div>
   </div>
 
@@ -391,83 +501,6 @@ class PretrainOnlineMonitor:
       node.textContent = value;
     }}
 
-    function drawSeries(canvasId, seriesList, title) {{
-      const canvas = document.getElementById(canvasId);
-      if (!canvas) return;
-      const rect = canvas.getBoundingClientRect();
-      const width = Math.max(600, Math.floor(rect.width));
-      const height = 360;
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext("2d");
-      ctx.clearRect(0, 0, width, height);
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, width, height);
-      const margin = {{ left: 34, right: 18, top: 22, bottom: 42 }};
-      const points = [];
-      seriesList.forEach(function(series) {{
-        (series.values || []).forEach(function(item) {{
-          if (item.y !== null && item.y !== undefined && !Number.isNaN(item.y)) points.push(item);
-        }});
-      }});
-      if (!points.length) {{
-        ctx.fillStyle = "#6b7280";
-        ctx.font = '16px "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif';
-        ctx.fillText("暂无数据", 24, 40);
-        return;
-      }}
-      const xs = points.map(function(item) {{ return item.x; }});
-      const ys = points.map(function(item) {{ return item.y; }});
-      const xMin = Math.min.apply(null, xs);
-      const xMax = Math.max.apply(null, xs);
-      const yMinRaw = Math.min.apply(null, ys);
-      const yMaxRaw = Math.max.apply(null, ys);
-      const ySpan = Math.max(1e-6, yMaxRaw - yMinRaw);
-      const yMin = yMinRaw - ySpan * 0.08;
-      const yMax = yMaxRaw + ySpan * 0.08;
-      const chartW = width - margin.left - margin.right;
-      const chartH = height - margin.top - margin.bottom;
-      const xScale = function(x) {{ return margin.left + ((x - xMin) / Math.max(1, xMax - xMin)) * chartW; }};
-      const yScale = function(y) {{ return margin.top + (1 - (y - yMin) / Math.max(1e-6, yMax - yMin)) * chartH; }};
-      ctx.strokeStyle = "#d6deea";
-      ctx.lineWidth = 1;
-      for (let i = 0; i < 5; i++) {{
-        const y = margin.top + (chartH / 4) * i;
-        ctx.beginPath();
-        ctx.moveTo(margin.left, y);
-        ctx.lineTo(width - margin.right, y);
-        ctx.stroke();
-      }}
-      ctx.strokeStyle = "#25344c";
-      ctx.beginPath();
-      ctx.moveTo(margin.left, margin.top);
-      ctx.lineTo(margin.left, height - margin.bottom);
-      ctx.lineTo(width - margin.right, height - margin.bottom);
-      ctx.stroke();
-      ctx.fillStyle = "#25344c";
-      ctx.font = '14px "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif';
-      ctx.fillText(title, margin.left, 14);
-      seriesList.forEach(function(series, index) {{
-        const valid = (series.values || []).filter(function(item) {{ return item.y !== null && item.y !== undefined && !Number.isNaN(item.y); }});
-        if (!valid.length) return;
-        ctx.strokeStyle = series.color;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        valid.forEach(function(item, itemIndex) {{
-          const x = xScale(item.x);
-          const y = yScale(item.y);
-          if (itemIndex === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        }});
-        ctx.stroke();
-        const legendX = margin.left + index * 150;
-        ctx.fillStyle = series.color;
-        ctx.fillRect(legendX, height - 18, 18, 4);
-        ctx.fillStyle = "#374151";
-        ctx.fillText(series.label, legendX + 24, height - 12);
-      }});
-    }}
-
     function renderState() {{
       const status = state.status || {{}};
       const latestTrain = state.latest_train_losses || {{}};
@@ -484,20 +517,25 @@ class PretrainOnlineMonitor:
       setText("statObjective", state.objective || "--");
       setText("projectionTitle", "固定样本 " + (state.projection_title || "PCA"));
 
-      const epochHistory = state.epoch_history || [];
-      drawSeries("lossCanvas", [
-        {{ label: "Total loss", color: "#1f77b4", values: epochHistory.map(function(item) {{ return {{ x: item.epoch, y: item.train_loss }}; }}) }},
-      ], "Epoch");
-      drawSeries("retrievalCanvas", [
-        {{ label: "Mean R@1", color: "#2ca02c", values: epochHistory.map(function(item) {{ return {{ x: item.epoch, y: item.mean_r1 }}; }}) }},
-        {{ label: "Mean R@5", color: "#ff7f0e", values: epochHistory.map(function(item) {{ return {{ x: item.epoch, y: item.mean_r5 }}; }}) }},
-      ], "Epoch");
-
       const tsneImage = document.getElementById("tsneImage");
       const nextSrc = state.tsne_image + '?v=' + String(state.tsne_version || 0);
       if (tsneImage.dataset.src !== nextSrc) {{
         tsneImage.src = nextSrc;
         tsneImage.dataset.src = nextSrc;
+      }}
+
+      const lossCurveImage = document.getElementById("lossCurveImage");
+      const lossCurveSrc = (state.loss_curve_image || "loss_curve.png") + '?v=' + String(state.status && state.status.epoch ? state.status.epoch : 0);
+      if (lossCurveImage && lossCurveImage.dataset.src !== lossCurveSrc) {{
+        lossCurveImage.src = lossCurveSrc;
+        lossCurveImage.dataset.src = lossCurveSrc;
+      }}
+
+      const retrievalCurveImage = document.getElementById("retrievalCurveImage");
+      const retrievalCurveSrc = (state.retrieval_curve_image || "retrieval_curve.png") + '?v=' + String(state.status && state.status.epoch ? state.status.epoch : 0);
+      if (retrievalCurveImage && retrievalCurveImage.dataset.src !== retrievalCurveSrc) {{
+        retrievalCurveImage.src = retrievalCurveSrc;
+        retrievalCurveImage.dataset.src = retrievalCurveSrc;
       }}
     }}
 

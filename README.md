@@ -143,6 +143,35 @@ python run_pretrain.py --config configs/train_joint_contrastive.yaml --pretrain-
 python run_pretrain.py --config configs/train_joint_contrastive.yaml --pretrain-mode strict --target-dataset ds002338
 ```
 
+### 4.3 Windows 本地监控 server
+
+如果你想在 Windows 下查看联合预训练的在线监控页面，可以直接在仓库根目录运行：
+
+```powershell
+python server\app.py
+```
+
+启动后访问：
+
+```text
+http://127.0.0.1:8765
+```
+
+这个页面会代理当前训练任务对应的 `online_monitor` 目录，主要展示以下内容：
+
+- `index.html`：在线监控页面入口
+- `monitor_state.json`：前端轮询读取的状态文件
+- `tsne_latest.png`：最近一次投影图，可能是 PCA 或 t-SNE
+- `projection_epochs/`：按 epoch 保存的历史投影图
+- `loss_curve.png`：训练损失曲线
+- `retrieval_curve.png`：检索指标曲线，显示 `R@1 / R@5`
+
+说明：
+
+- 可通过 `train.visualization.online_monitor.projection_method` 选择 `pca` 或 `tsne`
+- 如果开启按 epoch 保存投影图，历史图片会写入 `projection_epochs/`
+- `R@1 / R@5` 会随着 epoch 更新，用于观察跨模态检索效果
+
 ## 5. LOSO 微调
 
 README 只保留 LOSO 微调，不再介绍单 fold 微调。

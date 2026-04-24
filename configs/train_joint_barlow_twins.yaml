@@ -22,6 +22,8 @@ train:
   log_interval: 200
   eval_interval: 1
   resume_path: ""
+  retrieval_eval_max_samples: 2000
+  retrieval_eval_seed: 42
   pretrain_objective: barlow_twins
   barlow_lambda_offdiag: 0.005
   barlow_eps: 1.0e-9

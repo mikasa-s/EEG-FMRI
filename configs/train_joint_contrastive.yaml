@@ -10,7 +10,7 @@ train:
   # epochs: 200
   # batch_size: 512
   # eval_batch_size: 512
-  num_workers: 4
+  num_workers: 0
   pin_memory: true
   lr: 0.0001
   min_lr: 0.00005
@@ -26,6 +26,8 @@ train:
   log_interval: 200
   eval_interval: 1
   resume_path: ""
+  retrieval_eval_max_samples: 2000
+  retrieval_eval_seed: 42
   visualization:
     online_monitor:
       enabled: false

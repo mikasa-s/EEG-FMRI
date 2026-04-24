@@ -314,6 +314,10 @@ class TrainConfig:
             int(train_cfg.get("max_samples"))
         if "max_samples_seed" in train_cfg and train_cfg.get("max_samples_seed") not in (None, ""):
             int(train_cfg.get("max_samples_seed"))
+        if "retrieval_eval_max_samples" in train_cfg and train_cfg.get("retrieval_eval_max_samples") not in (None, ""):
+            int(train_cfg.get("retrieval_eval_max_samples"))
+        if "retrieval_eval_seed" in train_cfg and train_cfg.get("retrieval_eval_seed") not in (None, ""):
+            int(train_cfg.get("retrieval_eval_seed"))
 
         # 对比学习使用单一 manifest；微调仍使用 train/val/test manifests。
         manifest_value = str(data_cfg.get("manifest_csv", data_cfg.get("train_manifest_csv", "")))

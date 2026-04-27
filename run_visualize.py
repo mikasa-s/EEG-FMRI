@@ -270,8 +270,8 @@ def run_contrastive_visualization(args: argparse.Namespace) -> None:
     model = build_model(config, device=device)
     checkpoint_report = load_model_checkpoint(model, checkpoint_path, device=device)
     embeddings = collect_embeddings(model, loader, device=device)
-    tsne_path = next_indexed_output_path(output_dir, "tsne_shared_private", ".png")
-    heatmap_path = next_indexed_output_path(output_dir, "cross_modal_similarity_heatmap", ".png")
+    tsne_path = next_indexed_output_path(output_dir, "tsne_shared_private", ".svg")
+    heatmap_path = next_indexed_output_path(output_dir, "cross_modal_similarity_heatmap", ".svg")
     summary_path = next_indexed_output_path(output_dir, "visualization_summary", ".json")
     tsne_report = save_shared_private_tsne(
         embeddings["eeg_shared"],
@@ -446,7 +446,7 @@ def run_offline_loso_visualization(args: argparse.Namespace) -> None:
         report = save_confusion_matrix(
             labels=np.asarray(loso_labels, dtype=int),
             preds=np.asarray(loso_preds, dtype=int),
-            output_path=output_dir / f"confusion_matrix_{args.dataset_name}_loso.png",
+            output_path=output_dir / f"confusion_matrix_{args.dataset_name}_loso.svg",
             class_names=class_names,
             title=resolve_confusion_title(args.dataset_name, f"{args.dataset_name} LOSO Confusion Matrix"),
             normalize=False,

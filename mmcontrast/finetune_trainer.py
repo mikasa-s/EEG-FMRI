@@ -305,7 +305,7 @@ class FinetuneTrainer:
     def save_train_curve_artifacts(self, history: list[dict[str, Any]]) -> dict[str, Any] | None:
         if not is_main_process() or not self.enable_train_curve_visualization:
             return None
-        plot_path = next_indexed_output_path(self.train_curve_output_dir, "train_loss_curve", ".png")
+        plot_path = next_indexed_output_path(self.train_curve_output_dir, "train_loss_curve", ".svg")
         history_path = next_indexed_output_path(self.train_curve_output_dir, "train_loss_history", ".json")
         history_csv_path = next_indexed_output_path(self.train_curve_output_dir, "train_loss_history", ".csv")
         report = save_finetune_loss_curve(
@@ -339,7 +339,7 @@ class FinetuneTrainer:
         report = save_confusion_matrix(
             labels=labels_cpu.numpy(),
             preds=preds_cpu.numpy(),
-            output_path=self.output_dir / f"{split_name}_confusion_matrix.png",
+            output_path=self.output_dir / f"{split_name}_confusion_matrix.svg",
             class_names=class_names,
             title=self.resolve_confusion_title(default_title=f"{split_name.title()} Confusion Matrix"),
             normalize=False,

@@ -161,10 +161,10 @@ http://127.0.0.1:8765
 
 - `index.html`：在线监控页面入口
 - `monitor_state.json`：前端轮询读取的状态文件
-- `tsne_latest.png`：最近一次投影图，可能是 PCA 或 t-SNE
+- `tsne_latest.svg`：最近一次投影图，可能是 PCA 或 t-SNE
 - `projection_epochs/`：按 epoch 保存的历史投影图
-- `loss_curve.png`：训练损失曲线
-- `retrieval_curve.png`：检索指标曲线，显示 `R@1 / R@5`
+- `loss_curve.svg`：训练损失曲线
+- `retrieval_curve.svg`：检索指标曲线，显示 `R@1 / R@5`
 
 说明：
 

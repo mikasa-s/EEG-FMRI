@@ -796,5 +796,48 @@
     loadStatus();
     window.setInterval(loadStatus, 3000);
   </script>
+  <script>
+    (function () {
+      const introText = "本机网页前端。这里直接启动 run_pretrain.py，默认把监控样本数和训练样本数联动，主区域优先展示在线监控，不再堆一排低价值状态。";
+
+      document.querySelectorAll("p, div, span").forEach(function (node) {
+        const text = (node.textContent || "").trim();
+        if (text === introText) {
+          node.remove();
+        }
+      });
+
+      [
+        "GitHub 风格深色界面",
+        "状态只保留 training / end",
+        "日志按需展开",
+        "这里只保留必要的排障信息。正常情况下，直接看 Monitor 面板即可，不需要盯终端输出。",
+      ].forEach(function (label) {
+        document.querySelectorAll("span, div, button, a, li").forEach(function (node) {
+          const text = (node.textContent || "").trim();
+          if (text !== label) return;
+          const removable = node.closest("button, a, li, div, span");
+          if (removable) {
+            removable.remove();
+          } else {
+            node.remove();
+          }
+        });
+      });
+
+      document.querySelectorAll("section, div").forEach(function (node) {
+        const text = (node.textContent || "").replace(/\s+/g, " ").trim();
+        if (!text) return;
+        const hasLowValueStatus =
+          text.includes("运行状态") &&
+          text.includes("训练模式") &&
+          text.includes("目标数据集") &&
+          text.includes("输出目录");
+        if (hasLowValueStatus) {
+          node.remove();
+        }
+      });
+    })();
+  </script>
 </body>
 </html>

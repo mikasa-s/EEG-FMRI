@@ -79,11 +79,11 @@ class PretrainOnlineMonitor:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.state_path = self.output_dir / "monitor_state.json"
         self.html_path = self.output_dir / "index.html"
-        self.tsne_path = self.output_dir / "tsne_latest.png"
+        self.tsne_path = self.output_dir / "tsne_latest.svg"
         self.projection_epoch_dir = self.output_dir / "projection_epochs"
         self.projection_epoch_dir.mkdir(parents=True, exist_ok=True)
-        self.loss_curve_path = self.output_dir / "loss_curve.png"
-        self.retrieval_curve_path = self.output_dir / "retrieval_curve.png"
+        self.loss_curve_path = self.output_dir / "loss_curve.svg"
+        self.retrieval_curve_path = self.output_dir / "retrieval_curve.svg"
         self.max_samples = max(2, int(max_samples))
         self.random_seed = int(random_seed)
         self.tsne_interval_epochs = max(1, int(tsne_interval_epochs))
@@ -333,7 +333,7 @@ class PretrainOnlineMonitor:
         }
         if "eeg_private" in outputs:
             groups["EEG private"] = outputs["eeg_private"]
-        epoch_projection_path = self.projection_epoch_dir / f"{self.projection_method}_epoch_{int(epoch):03d}.png"
+        epoch_projection_path = self.projection_epoch_dir / f"{self.projection_method}_epoch_{int(epoch):03d}.svg"
         if self.projection_method == "pca":
             report = save_embedding_groups_pca(
                 groups,

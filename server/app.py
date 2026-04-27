@@ -268,6 +268,9 @@ def list_train_config_summaries() -> list[dict[str, Any]]:
 
 
 def patch_online_monitor_html(content: str) -> str:
+    content = content.replace("loss_curve.png", "loss_curve.svg")
+    content = content.replace("retrieval_curve.png", "retrieval_curve.svg")
+    content = content.replace("tsne_latest.png", "tsne_latest.svg")
     if "__cmclCurveCompat" in content:
         return content
     if "</body>" in content:
@@ -299,6 +302,23 @@ class JobManager:
         self._lock = threading.Lock()
         self._current_job: JobState | None = None
         self._job_counter = 0
+
+    def _find_latest_monitor_dir(self) -> Path | None:
+        search_roots = [
+            PROJECT_ROOT / "pretrained_weights",
+            PROJECT_ROOT / "outputs",
+        ]
+        candidates: list[Path] = []
+        for root in search_roots:
+            if not root.exists():
+                continue
+            for path in root.rglob("online_monitor"):
+                if path.is_dir() and (path / "index.html").exists():
+                    candidates.append(path)
+        if not candidates:
+            return None
+        candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        return candidates[0]
 
     def start_job(self, payload: dict[str, Any]) -> JobState:
         with self._lock:
@@ -469,8 +489,12 @@ class JobManager:
         with self._lock:
             job = self._current_job
             if job is None:
+                latest_monitor_dir = self._find_latest_monitor_dir()
+                monitor_url = "/monitor/index.html" if latest_monitor_dir is not None else ""
                 return {
                     "running": False,
+                    "monitor_url": monitor_url,
+                    "monitor_root": str(latest_monitor_dir) if latest_monitor_dir is not None else "",
                     "available_configs": list_train_config_summaries(),
                 }
             running = job.process.poll() is None
@@ -512,15 +536,24 @@ class JobManager:
         with self._lock:
             job = self._current_job
             if job is None:
-                return None
-            monitor_dir = self._find_monitor_dir(job)
+                monitor_dir = self._find_latest_monitor_dir()
+                if monitor_dir is None:
+                    return None
+            else:
+                monitor_dir = self._find_monitor_dir(job)
         safe_rel = rel_path.lstrip("/").strip() or "index.html"
         target = (monitor_dir / safe_rel).resolve()
         try:
             target.relative_to(monitor_dir.resolve())
         except ValueError:
             return None
-        return target if target.exists() else None
+        if target.exists():
+            return target
+        if target.suffix.lower() == ".svg":
+            fallback = target.with_suffix(".png")
+            if fallback.exists():
+                return fallback
+        return None
 
 
 JOB_MANAGER = JobManager()
@@ -550,6 +583,8 @@ class AppHandler(BaseHTTPRequestHandler):
             mime_type = "text/html; charset=utf-8"
         else:
             content = path.read_bytes()
+            if path.suffix.lower() == ".svg":
+                mime_type = "image/svg+xml"
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", mime_type or "application/octet-stream")
         self.send_header("Content-Length", str(len(content)))

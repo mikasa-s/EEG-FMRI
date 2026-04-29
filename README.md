@@ -246,3 +246,34 @@ python run_visualize.py offline-loso --dataset-name ds002336 --config configs/fi
 python run_visualize.py offline-loso --dataset-name ds002338 --config configs/finetune_ds002338.yaml --checkpoints-root save/2338/run_output/finetune --output-dir outputs/ds002338/offline_eval --allow-missing-pretrain-checkpoint
 python run_visualize.py offline-loso --dataset-name ds009999 --config configs/finetune_ds009999.yaml --checkpoints-root save/9999/run_output/finetune --output-dir outputs/ds009999/offline_eval --allow-missing-pretrain-checkpoint
 ```
+
+### 6.3 EEG shared/private 分支归因可视化
+
+`branch-attribution` 用于分析微调分类模型中 EEG 共享表征和 EEG 私有表征对分类决策的相对贡献。该命令以目标类别 logit 为标量目标，分别计算它对 `eeg_shared` 和 `eeg_private` 的梯度，并使用 `abs(gradient * activation)` 的均值作为分支贡献分数。
+
+默认目标为模型预测类别：
+
+- `--target pred`：分析模型实际预测决策中的 shared/private 贡献，推荐作为主结果
+- `--target label`：分析真实标签对应 logit 中的 shared/private 贡献，可作为补充结果
+
+输出文件包括：
+
+- `<dataset>_branch_attribution.csv`：逐样本 shared/private 贡献分数；LOSO 模式下会额外记录 fold
+- `<dataset>_branch_attribution_summary.csv`：整个数据集总体均值、标准差，以及按 fold 和预测类别分组的均值
+- `<dataset>_branch_attribution_bar.svg`：总体 shared/private 贡献柱状图
+- `<dataset>_branch_attribution_scatter.svg`：逐样本 shared/private 贡献散点图
+- `<dataset>_branch_attribution_report.json`：运行参数与 checkpoint 加载报告
+
+该功能要求微调模型使用 `finetune.eeg_encoder_variant=shared_private`，并且 `finetune.classifier_mode` 为 `concat` 或 `add`，因为只有这两种模式下 shared 和 private 两个分支都会参与分类。
+
+Windows：
+
+```powershell
+python run_visualize.py branch-attribution --config configs\finetune_ds002336.yaml --loso --checkpoints-root outputs\ds002336\finetune --output-dir outputs\ds002336\branch_attribution_loso --batch-size 128 --target pred
+```
+
+Linux：
+
+```bash
+python run_visualize.py branch-attribution --config configs/finetune_ds002336.yaml --loso --checkpoints-root outputs/ds002336/finetune --output-dir outputs/ds002336/branch_attribution_loso --batch-size 128 --target pred
+```

@@ -285,7 +285,12 @@ class EEGfMRIClassifier(nn.Module):
             return int(getattr(encoder, "shared_dim")) + int(getattr(encoder, "private_dim"))
         return int(getattr(encoder, "feature_dim"))
 
-    def forward(self, eeg: torch.Tensor | None = None, fmri: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+    def forward(
+        self,
+        eeg: torch.Tensor | None = None,
+        fmri: torch.Tensor | None = None,
+        return_branch_features: bool = False,
+    ) -> dict[str, torch.Tensor]:
         if self.baseline_outputs_logits:
             if eeg is None:
                 raise ValueError("Traditional EEG baselines require EEG input.")
@@ -296,8 +301,28 @@ class EEGfMRIClassifier(nn.Module):
                 "fmri_feat": None,
             }
 
+        branch_features: dict[str, torch.Tensor] = {}
         if eeg is not None:
-            if self.eeg_encoder is not None and hasattr(self.eeg_encoder, "encode_for_finetune"):
+            eeg_encoder = self.eeg_encoder if self.eeg_encoder is not None else (self.backbone.eeg_encoder if self.backbone is not None else None)
+            if return_branch_features and eeg_encoder is not None and hasattr(eeg_encoder, "forward"):
+                eeg_outputs = eeg_encoder(eeg)
+                if isinstance(eeg_outputs, dict) and "eeg_shared" in eeg_outputs and "eeg_private" in eeg_outputs:
+                    branch_features["eeg_shared"] = eeg_outputs["eeg_shared"]
+                    branch_features["eeg_private"] = eeg_outputs["eeg_private"]
+                    if self.classifier_mode == "shared":
+                        eeg_feat = eeg_outputs["eeg_shared"]
+                    elif self.classifier_mode == "private":
+                        eeg_feat = eeg_outputs["eeg_private"]
+                    elif self.classifier_mode == "add":
+                        eeg_feat = eeg_outputs["eeg_shared"] + eeg_outputs["eeg_private"]
+                    else:
+                        eeg_feat = torch.cat((eeg_outputs["eeg_shared"], eeg_outputs["eeg_private"]), dim=-1)
+                elif isinstance(eeg_outputs, dict) and "eeg_shared" in eeg_outputs:
+                    branch_features["eeg_shared"] = eeg_outputs["eeg_shared"]
+                    eeg_feat = eeg_outputs["eeg_shared"]
+                else:
+                    eeg_feat = eeg_outputs
+            elif self.eeg_encoder is not None and hasattr(self.eeg_encoder, "encode_for_finetune"):
                 eeg_feat = self.eeg_encoder.encode_for_finetune(eeg, mode=self.classifier_mode)
             elif self.backbone is not None:
                 eeg_feat = self.backbone.encode_eeg_feature(eeg, mode=self.classifier_mode)
@@ -332,8 +357,10 @@ class EEGfMRIClassifier(nn.Module):
                 fused = torch.cat([eeg_feat, fmri_feat], dim=-1)
 
         logits = self.classifier(fused)
-        return {
+        outputs = {
             "logits": logits,
             "eeg_feat": eeg_feat,
             "fmri_feat": fmri_feat,
         }
+        outputs.update(branch_features)
+        return outputs

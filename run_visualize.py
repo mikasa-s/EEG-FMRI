@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import math
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -19,7 +20,7 @@ from mmcontrast.checkpoint_utils import extract_state_dict, load_checkpoint_file
 from mmcontrast.config import TrainConfig
 from mmcontrast.dataset_batching import GroupedBatchSampler
 from mmcontrast.datasets import PairedEEGfMRIDataset
-from mmcontrast.models import EEGfMRIContrastiveModel
+from mmcontrast.models import EEGfMRIClassifier, EEGfMRIContrastiveModel
 from mmcontrast.visualization import (
     next_indexed_output_path,
     save_confusion_matrix,
@@ -38,6 +39,7 @@ DATASET_CLASS_NAMES = {
 DATASET_CONFUSION_TITLES = {
     "ds002336": "XP1",
     "ds002338": "XP2",
+    "ds002739": "PDC",
     "ds009999": "SEED",
 }
 
@@ -104,6 +106,43 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default="",
         help="Optional comma-separated class names for confusion matrix axes.",
+    )
+
+    attribution_parser = subparsers.add_parser(
+        "branch-attribution",
+        help="Compute gradient attribution for EEG shared/private finetune branches.",
+    )
+    attribution_parser.add_argument("--config", type=str, required=True, help="Finetune config path.")
+    attribution_parser.add_argument("--checkpoint", type=str, default="", help="Finetune checkpoint path for single-fold attribution.")
+    attribution_parser.add_argument("--loso", action="store_true", help="Aggregate branch attribution over all LOSO fold test sets.")
+    attribution_parser.add_argument(
+        "--checkpoints-root",
+        type=str,
+        default="",
+        help="Root directory that contains fold_*/checkpoints/best.pth for --loso.",
+    )
+    attribution_parser.add_argument("--checkpoint-relpath", type=str, default="checkpoints/best.pth")
+    attribution_parser.add_argument("--split-root", type=str, default="", help="Optional LOSO split root. Defaults to <root_dir>/loso_subjectwise.")
+    attribution_parser.add_argument("--manifest", type=str, default="", help="Optional manifest override. Defaults to data.test_manifest_csv.")
+    attribution_parser.add_argument("--root-dir", type=str, default="", help="Optional dataset root override.")
+    attribution_parser.add_argument("--output-dir", type=str, default="outputs/visualizations/branch_attribution")
+    attribution_parser.add_argument("--batch-size", type=int, default=32)
+    attribution_parser.add_argument("--num-workers", type=int, default=0)
+    attribution_parser.add_argument("--max-samples", type=int, default=0)
+    attribution_parser.add_argument(
+        "--target",
+        type=str,
+        choices=["pred", "label"],
+        default="pred",
+        help="Attribution target: predicted class logit or true-label logit.",
+    )
+    attribution_parser.add_argument("--device", type=str, default="", help="Explicit device, e.g. cpu or cuda:0.")
+    attribution_parser.add_argument(
+        "--set",
+        dest="overrides",
+        action="append",
+        default=[],
+        help="Generic override in the form section.key=value. Can be repeated.",
     )
     return parser
 
@@ -462,6 +501,362 @@ def run_offline_loso_visualization(args: argparse.Namespace) -> None:
             writer.writerows(summary_rows)
 
 
+def build_finetune_attribution_dataset(cfg: dict[str, Any], args: argparse.Namespace) -> PairedEEGfMRIDataset:
+    data_cfg = dict(cfg["data"])
+    manifest_path = args.manifest.strip() or str(data_cfg.get("test_manifest_csv", "")).strip()
+    if not manifest_path:
+        raise ValueError("A test manifest is required. Set data.test_manifest_csv or pass --manifest.")
+    data_cfg["manifest_csv"] = str(resolve_path(manifest_path))
+    if args.root_dir.strip():
+        data_cfg["root_dir"] = args.root_dir.strip()
+    if data_cfg.get("root_dir"):
+        data_cfg["root_dir"] = str(resolve_path(str(data_cfg["root_dir"])))
+    for key in ("train_manifest_csv", "val_manifest_csv", "test_manifest_csv", "expected_eeg_shape", "expected_fmri_shape"):
+        data_cfg.pop(key, None)
+    fusion = str((cfg.get("finetune", {}) or {}).get("fusion", "eeg_only")).strip().lower()
+    data_cfg["require_eeg"] = fusion != "fmri_only"
+    data_cfg["require_fmri"] = fusion != "eeg_only"
+    return PairedEEGfMRIDataset(**data_cfg)
+
+
+def build_finetune_classifier_for_attribution(cfg: dict[str, Any], checkpoint_path: Path, device: torch.device) -> tuple[EEGfMRIClassifier, dict[str, Any]]:
+    model_cfg = copy_config_for_attribution(cfg)
+    model = EEGfMRIClassifier(model_cfg).to(device)
+    checkpoint = load_checkpoint_file(str(checkpoint_path))
+    state_dict = extract_state_dict(checkpoint, preferred_keys=("model", "module", "state_dict"))
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    model.eval()
+    return model, {
+        "missing_count": int(len(missing)),
+        "unexpected_count": int(len(unexpected)),
+        "missing": [str(item) for item in missing[:20]],
+        "unexpected": [str(item) for item in unexpected[:20]],
+        "device": str(device),
+    }
+
+
+def copy_config_for_attribution(cfg: dict[str, Any]) -> dict[str, Any]:
+    payload = json.loads(json.dumps(cfg))
+    payload.setdefault("finetune", {})
+    payload["finetune"]["contrastive_checkpoint_path"] = ""
+    return payload
+
+
+def summarize_attribution_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    groups: list[tuple[str, list[dict[str, Any]]]] = [("all", rows)]
+    folds = sorted({str(row.get("fold", "")) for row in rows if str(row.get("fold", "")).strip()})
+    groups.extend((fold, [row for row in rows if str(row.get("fold", "")) == fold]) for fold in folds)
+    pred_classes = sorted({int(row["pred"]) for row in rows})
+    groups.extend((f"pred_{klass}", [row for row in rows if int(row["pred"]) == klass]) for klass in pred_classes)
+    for group_name, group_rows in groups:
+        if not group_rows:
+            continue
+        shared_values = [float(row["shared_score"]) for row in group_rows]
+        private_values = [float(row["private_score"]) for row in group_rows]
+        shared_mean = mean(shared_values)
+        private_mean = mean(private_values)
+        summaries.append(
+            {
+                "group": group_name,
+                "sample_count": int(len(group_rows)),
+                "shared_mean": shared_mean,
+                "private_mean": private_mean,
+                "shared_std": std(shared_values),
+                "private_std": std(private_values),
+                "private_shared_ratio": private_mean / shared_mean if shared_mean and not math.isnan(shared_mean) else float("nan"),
+            }
+        )
+    return summaries
+
+
+def infer_branch_attribution_dataset_name(config: dict[str, Any], rows: list[dict[str, Any]] | None = None) -> str:
+    data_cfg = dict(config.get("data", {}) or {})
+    finetune_cfg = dict(config.get("finetune", {}) or {})
+    candidates = [
+        str(data_cfg.get("dataset", "")).strip(),
+        str(data_cfg.get("dataset_name", "")).strip(),
+        str(data_cfg.get("root_dir", "")).strip(),
+        str(finetune_cfg.get("output_dir", "")).strip(),
+    ]
+    if rows:
+        candidates.extend(str(row.get("fold", "")).strip() for row in rows[:20])
+    for candidate in candidates:
+        match = re.search(r"(ds\d+)", candidate.replace("\\", "/"), flags=re.IGNORECASE)
+        if match:
+            return match.group(1).lower()
+    return "dataset"
+
+
+def branch_attribution_title(dataset_name: str) -> str:
+    return DATASET_CONFUSION_TITLES.get(dataset_name.strip().lower(), dataset_name)
+
+
+def save_branch_attribution_bar(summary_rows: list[dict[str, Any]], output_path: Path, dataset_name: str) -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return
+    all_row = next((row for row in summary_rows if row.get("group") == "all"), None)
+    if all_row is None:
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(3.5, 3.0), dpi=160)
+    labels = ["Shared", "Private"]
+    values = [float(all_row["shared_mean"]), float(all_row["private_mean"])]
+    x_positions = np.asarray([-0.16, 0.16], dtype=float)
+    ax.bar(x_positions, values, color=["#f08a6c", "#6fa8ff"], width=0.16)
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(labels)
+    ax.set_xlim(-0.34, 0.34)
+    ax.set_ylabel("Attribution Score", fontsize=12)
+    ax.set_title(branch_attribution_title(dataset_name), fontsize=16)
+    ax.grid(axis="y", alpha=0.25)
+    ax.tick_params(axis="y", labelsize=12)
+    ax.tick_params(axis="x", labelsize=17)
+    fig.tight_layout(pad=0.45)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_branch_attribution_scatter(rows: list[dict[str, Any]], output_path: Path, dataset_name: str) -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return
+    if not rows:
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    x = np.asarray([float(row["shared_score"]) for row in rows], dtype=float)
+    y = np.asarray([float(row["private_score"]) for row in rows], dtype=float)
+    fig, ax = plt.subplots(figsize=(5.6, 5.0), dpi=160)
+    pred_values = sorted({int(row["pred"]) for row in rows})
+    palette = ["#2f6df6", "#e4572e", "#1b9e77", "#8e44ad", "#f2b134", "#4c78a8"]
+    for index, pred_value in enumerate(pred_values):
+        mask = np.asarray([int(row["pred"]) == pred_value for row in rows], dtype=bool)
+        ax.scatter(x[mask], y[mask], color=palette[index % len(palette)], s=18, alpha=0.72, label=f"Pred {pred_value}")
+    limit = float(max(np.nanmax(x), np.nanmax(y))) if len(rows) else 1.0
+    ax.plot([0, limit], [0, limit], color="#6b7280", linestyle="--", linewidth=1.0)
+    ax.set_xlabel("Shared Attribution")
+    ax.set_ylabel("Private Attribution")
+    ax.set_title(branch_attribution_title(dataset_name))
+    ax.grid(True, alpha=0.25)
+    ax.legend(frameon=False, title="Prediction")
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def collect_branch_attribution_rows(
+    config: dict[str, Any],
+    args: argparse.Namespace,
+    checkpoint_path: Path,
+    device: torch.device,
+    *,
+    fold_name: str,
+    sample_offset: int = 0,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    dataset = build_finetune_attribution_dataset(config, args)
+    if args.max_samples > 0 and len(dataset) > args.max_samples:
+        dataset = Subset(dataset, list(range(int(args.max_samples))))
+    loader = DataLoader(
+        dataset,
+        batch_size=max(1, int(args.batch_size)),
+        shuffle=False,
+        num_workers=max(0, int(args.num_workers)),
+        pin_memory=device.type == "cuda",
+        persistent_workers=bool(args.num_workers > 0),
+    )
+    model, checkpoint_report = build_finetune_classifier_for_attribution(config, checkpoint_path, device=device)
+
+    rows: list[dict[str, Any]] = []
+    local_offset = 0
+    for batch in loader:
+        eeg = batch["eeg"].to(device, non_blocking=True) if "eeg" in batch else None
+        fmri = batch["fmri"].to(device, non_blocking=True) if "fmri" in batch else None
+        labels = batch["label"].to(device, non_blocking=True).long()
+        model.zero_grad(set_to_none=True)
+        output = model(eeg=eeg, fmri=fmri, return_branch_features=True)
+        if "eeg_shared" not in output or "eeg_private" not in output:
+            raise RuntimeError("The finetune model did not return eeg_shared/eeg_private features.")
+        shared = output["eeg_shared"]
+        private = output["eeg_private"]
+        shared.retain_grad()
+        private.retain_grad()
+        logits = output["logits"]
+        preds = logits.detach().argmax(dim=1)
+        target_classes = preds if args.target == "pred" else labels
+        target_logits = logits.gather(1, target_classes.view(-1, 1)).squeeze(1)
+        target_logits.sum().backward()
+        if shared.grad is None or private.grad is None:
+            raise RuntimeError("Could not compute gradients for both EEG branches. Check classifier_mode and model graph.")
+        shared_scores = (shared.grad * shared).abs().flatten(1).mean(dim=1).detach().cpu()
+        private_scores = (private.grad * private).abs().flatten(1).mean(dim=1).detach().cpu()
+        labels_cpu = labels.detach().cpu()
+        preds_cpu = preds.detach().cpu()
+        targets_cpu = target_classes.detach().cpu()
+        for index in range(labels_cpu.numel()):
+            shared_score = float(shared_scores[index].item())
+            private_score = float(private_scores[index].item())
+            rows.append(
+                {
+                    "fold": fold_name,
+                    "sample_index": int(sample_offset + local_offset + index),
+                    "fold_sample_index": int(local_offset + index),
+                    "label": int(labels_cpu[index].item()),
+                    "pred": int(preds_cpu[index].item()),
+                    "target": int(targets_cpu[index].item()),
+                    "shared_score": shared_score,
+                    "private_score": private_score,
+                    "private_shared_ratio": private_score / shared_score if shared_score else float("nan"),
+                }
+            )
+        local_offset += int(labels_cpu.numel())
+    return rows, checkpoint_report
+
+
+def write_branch_attribution_outputs(
+    rows: list[dict[str, Any]],
+    output_dir: Path,
+    *,
+    config: dict[str, Any],
+    target: str,
+    checkpoint_report: dict[str, Any],
+    checkpoints: list[str],
+    mode: str,
+) -> None:
+    if not rows:
+        raise RuntimeError("No attribution rows were collected.")
+
+    summary_rows = summarize_attribution_rows(rows)
+    dataset_name = infer_branch_attribution_dataset_name(config, rows)
+    prefix = f"{dataset_name}_branch_attribution"
+    detail_path = output_dir / f"{prefix}.csv"
+    summary_path = output_dir / f"{prefix}_summary.csv"
+    report_path = output_dir / f"{prefix}_report.json"
+    bar_path = output_dir / f"{prefix}_bar.svg"
+    scatter_path = output_dir / f"{prefix}_scatter.svg"
+    with detail_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+    with summary_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(summary_rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(summary_rows)
+    save_branch_attribution_bar(summary_rows, bar_path, dataset_name)
+    save_branch_attribution_scatter(rows, scatter_path, dataset_name)
+    with report_path.open("w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "mode": mode,
+                "dataset_name": dataset_name,
+                "checkpoints": checkpoints,
+                "output_dir": str(output_dir),
+                "target": target,
+                "sample_count": int(len(rows)),
+                "checkpoint_report": checkpoint_report,
+                "outputs": {
+                    "detail_csv": str(detail_path),
+                    "summary_csv": str(summary_path),
+                    "bar_svg": str(bar_path),
+                    "scatter_svg": str(scatter_path),
+                },
+            },
+            handle,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+
+def validate_branch_attribution_config(config: dict[str, Any]) -> None:
+    finetune_cfg = dict(config.get("finetune", {}) or {})
+    if str(finetune_cfg.get("eeg_encoder_variant", "shared_private")).strip().lower() != "shared_private":
+        raise ValueError("branch-attribution requires finetune.eeg_encoder_variant=shared_private.")
+    if str(finetune_cfg.get("classifier_mode", "concat")).strip().lower() not in {"concat", "add"}:
+        raise ValueError("branch-attribution requires finetune.classifier_mode=concat or add so both branches affect logits.")
+
+
+def run_branch_attribution_visualization(args: argparse.Namespace) -> None:
+    config = load_runtime_config(args)
+    validate_branch_attribution_config(config)
+
+    output_dir = resolve_path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    requested_device = args.device.strip()
+    device = torch.device(requested_device) if requested_device else torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+    if args.loso:
+        data_cfg = dict(config.get("data", {}) or {})
+        root_dir_value = args.root_dir.strip() or str(data_cfg.get("root_dir", "")).strip()
+        if not root_dir_value:
+            raise ValueError("LOSO branch attribution requires data.root_dir or --root-dir.")
+        root_dir = resolve_path(root_dir_value)
+        split_root = resolve_path(args.split_root) if args.split_root.strip() else (root_dir / "loso_subjectwise").resolve()
+        checkpoints_root_value = args.checkpoints_root.strip()
+        if not checkpoints_root_value:
+            raise ValueError("--loso requires --checkpoints-root.")
+        checkpoints_root = resolve_path(checkpoints_root_value)
+        fold_dirs = sorted(path for path in split_root.glob("fold_*") if path.is_dir())
+        if not fold_dirs:
+            raise RuntimeError(f"No fold_* directories found under {split_root}")
+
+        all_rows: list[dict[str, Any]] = []
+        checkpoint_reports: dict[str, Any] = {}
+        checkpoints: list[str] = []
+        sample_offset = 0
+        for fold_dir in fold_dirs:
+            fold_name = fold_dir.name
+            checkpoint_path = checkpoints_root / fold_name / args.checkpoint_relpath
+            if not checkpoint_path.exists():
+                raise FileNotFoundError(f"Checkpoint not found for {fold_name}: {checkpoint_path}")
+            fold_args = argparse.Namespace(**vars(args))
+            fold_args.manifest = str((fold_dir / "manifest_test.csv").resolve())
+            fold_args.root_dir = str(root_dir)
+            fold_rows, checkpoint_report = collect_branch_attribution_rows(
+                config,
+                fold_args,
+                checkpoint_path,
+                device,
+                fold_name=fold_name,
+                sample_offset=sample_offset,
+            )
+            all_rows.extend(fold_rows)
+            checkpoint_reports[fold_name] = checkpoint_report
+            checkpoints.append(str(checkpoint_path))
+            sample_offset += len(fold_rows)
+        write_branch_attribution_outputs(
+            all_rows,
+            output_dir,
+            config=config,
+            target=args.target,
+            checkpoint_report={"folds": checkpoint_reports},
+            checkpoints=checkpoints,
+            mode="loso",
+        )
+        return
+
+    if not args.checkpoint.strip():
+        raise ValueError("Single-fold branch attribution requires --checkpoint. Use --loso with --checkpoints-root for LOSO aggregation.")
+    checkpoint_path = resolve_path(args.checkpoint)
+    rows, checkpoint_report = collect_branch_attribution_rows(
+        config,
+        args,
+        checkpoint_path,
+        device,
+        fold_name=checkpoint_path.parent.parent.name,
+    )
+    write_branch_attribution_outputs(
+        rows,
+        output_dir,
+        config=config,
+        target=args.target,
+        checkpoint_report=checkpoint_report,
+        checkpoints=[str(checkpoint_path)],
+        mode="single",
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -470,6 +865,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.command == "offline-loso":
         run_offline_loso_visualization(args)
+        return
+    if args.command == "branch-attribution":
+        run_branch_attribution_visualization(args)
         return
     parser.error(f"Unknown visualization command: {args.command}")
 

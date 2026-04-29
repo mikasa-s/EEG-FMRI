@@ -115,8 +115,15 @@ def find_seed_mat_files(ds_root: Path, requested_subjects: list[str] | None, req
     subject_filter = {value.strip() for value in requested_subjects or []}
     session_filter = {value.strip() for value in requested_sessions or []}
     files: list[Path] = []
-    for mat_path in sorted(ds_root.rglob("*.mat")):
+    label_names = {"label", "labels"}
+    data_root = ds_root / "Preprocessed_EEG"
+    search_root = data_root if data_root.exists() else ds_root
+    for mat_path in sorted(search_root.rglob("*.mat")):
         if mat_path.resolve() == labels_mat.resolve():
+            continue
+        if mat_path.stem.strip().lower() in label_names:
+            continue
+        if "extractedfeatures" in {part.lower() for part in mat_path.parts}:
             continue
         subject_id, session_id = infer_subject_and_session(mat_path)
         if subject_filter and subject_id not in subject_filter:
@@ -224,6 +231,7 @@ def resolve_labels_mat(ds_root: Path, configured_path: Path | None) -> Path:
     candidates = [
         ds_root / "label.mat",
         ds_root / "Preprocessed_EEG" / "label.mat",
+        ds_root / "ExtractedFeatures" / "label.mat",
     ]
     for candidate in candidates:
         if candidate.exists():
